@@ -6,7 +6,7 @@ CWD = pathlib.Path(__file__).absolute().parent
 
 setup(
     name="precise_pushing",
-    packages=[package for package in find_packages() if package.startswith("panda_push")],
+    packages=[package for package in find_packages() if package.startswith("ur3_push")],
     install_requires = ["numpy>=1.20,<1.24.0",
                         "matplotlib>=3.3,!=3.6.1",
                         "seaborn",
@@ -23,7 +23,7 @@ setup(
                         "ray[default]",
                         "moviepy"
                         ],
-    entry_points={"gymnasium.envs":["__root__ = panda_push_mujoco.gym_panda_push.__init__:register_gymnasium_envs"]},
+    entry_points={"gymnasium.envs":["__root__ = ur3_push_mujoco.gym_ur3_push.__init__:register_gymnasium_envs"]},
     description="Precise planar object pushing using reinforcement learning based on MuJoCo and ROS", 
     author="Lara Bergmann",
     author_email="lara.bergmann@uni-bielefeld.de",

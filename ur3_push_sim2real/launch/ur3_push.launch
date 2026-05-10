@@ -1,0 +1,77 @@
+<?xml version="1.0"?>
+<launch>
+  <!-- Robot Customization -->
+  <arg name="robot_ip" default="192.168.10.20" />
+  <arg name="rviz"                  default="false"  doc="Should rviz be spawned?" />
+  <arg name="rvizfile"              default="$(find ur3_push_mujoco)/launch/rviz/panda_pokingStick.rviz" />
+  <arg name="arm_id"                default="panda" doc="Name of the panda robot to spawn" />
+  <arg name="controller"            default="joint_velocity_push_controller" doc="Which example controller should be started?" />
+  <arg name="ns"                    default="" />
+  <arg name="xacro_args"            default="" doc="Additional arguments to pass to *.urdf.xacro" />
+  <arg name="fixed_ee_trafo"        default="$(find ur3_push_sim2real)/config/fixed_EE_trafo.yaml" />
+
+  <!-- Since robot position and orientation are defined by the xml file, these option currently do not change the robot position, but should match the position and orientation of the model file -->
+  <arg name="x"           default="0"     doc="How far forward to place the base of the robot in [m]?" />
+  <arg name="y"           default="0"     doc="How far leftwards to place the base of the robot in [m]?" />
+  <arg name="z"           default="0"     doc="How far upwards to place the base of the robot in [m]?" />
+  <arg name="roll"        default="0"     doc="How much to rotate the base of the robot around its X-axis in [rad]?" />
+  <arg name="pitch"       default="0"     doc="How much to rotate the base of the robot around its Y-axis in [rad]?" />
+  <arg name="yaw"         default="0"     doc="How much to rotate the base of the robot around its Z-axis in [rad]?" />
+
+  <param name="/controller" value="$(arg controller)"/>
+  <param name="/camera/driver/auto_exposure" value="False" />
+  <param name="/camera/driver/auto_white_balance" value="False" />
+  <param name="/camera/driver/exposure" value="100" />
+
+  <!-- fixed ee trafo -->
+  <rosparam file="$(arg fixed_ee_trafo)" subst_value="true" />
+  <rosparam file="$(find ur3_push_sim2real)/config/controller_config.yaml" subst_value="true" />
+
+  <param name="robot_description"
+          command="xacro $(find ur3_push_mujoco)/assets/urdf/panda_pokingStick.urdf.xacro
+                  gazebo:=true
+                  arm_id:=$(arg arm_id)
+                  xyz:='$(arg x) $(arg y) $(arg z)'
+                  rpy:='$(arg roll) $(arg pitch) $(arg yaw)'
+                  $(arg xacro_args)">
+  </param>
+
+  <node name="franka_control" pkg="franka_control" type="franka_control_node" output="screen" required="true">
+    <rosparam command="load" file="$(find franka_control)/config/franka_control_node.yaml" subst_value="true" />
+    <param name="robot_ip" value="$(arg robot_ip)" />
+  </node>
+  
+  <!-- spawns the controller after the robot was put into its initial joint pose -->
+  <node pkg="controller_manager"
+        type="spawner"
+        name="$(arg arm_id)_controller_spawner"
+        respawn="false"
+        output="screen"
+        args="franka_state_controller $(arg controller)"
+  />
+
+  <node name="robot_state_publisher" pkg="robot_state_publisher" type="robot_state_publisher" />
+
+  <node name="joint_state_publisher" type="joint_state_publisher" pkg="joint_state_publisher">
+    <rosparam param="source_list">[franka_state_controller/joint_states] </rosparam>
+    <param name="rate" value="1000"/>
+  </node>
+
+  <!-- fixed EE trafo -->
+  <node name="set_fixed_EE_trafo" pkg="ur3_push_sim2real" type="set_fixed_EE_trafo.py" output="screen"/>
+
+  <include file="$(find panda_moveit_config)/launch/demo.launch" pass_all_args="true">
+    <arg name="load_robot_description" value="false" />
+    <arg name="moveit_controller_manager" value="simple" />
+    <arg name="use_rviz" value="false" />
+    <arg name="load_gripper" value="false" />
+  </include>
+
+  <include file="$(find openni2_launch)/launch/openni2.launch" pass_all_args="true"/>
+
+  <!-- rviz -->
+  <node  pkg="rviz" type="rviz" output="screen" name="rviz_$(arg arm_id)" args="-d $(arg rvizfile)" if="$(arg rviz)"/>
+  <node pkg="ur3_push_sim2real" name="scene_spawner" type="dt_vicon_scene_spawner" />
+  <include file="$(find ur3_push_sim2real)/launch/collision_monitor.launch" />
+
+</launch>
