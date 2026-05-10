@@ -13,7 +13,7 @@ parser.add_argument("--fixedObjectHeight", type=lambda x: None if x == 'None' el
 parser.add_argument("--useSimConfig", type=int, choices=[0, 1], default=1, help="use sim or real camera config?")
 config = parser.parse_args()
 
-data_path = os.getenv("PANDA_PUSH_DATAPATH")
+data_path = os.getenv("UR3_PUSH_DATAPATH")
 torch.manual_seed(4242)
 
 num_epochs = int(1e9)

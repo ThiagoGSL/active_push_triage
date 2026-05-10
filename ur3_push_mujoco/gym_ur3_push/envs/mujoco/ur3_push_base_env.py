@@ -110,7 +110,8 @@ class MuJoCoUR3PushBaseEnv(BasePushEnv):
         initial_ee_pos = mujoco_utils.get_site_xpos(self.model, self.data, self.ee_site_name).copy()
         self.initial_ee_xypos = initial_ee_pos[:2]
         self.initial_ee_zpos = initial_ee_pos[2]
-        self.height_table = self.model.geom("table").size[2] * 2
+        self.height_table = 0.02 # Z of table TOP surface in world frame (must match mujoco_utils.py table_surface_z)
+
 
         # controller (sets gravity compensation: body.gravcomp = 1)
         if self.use_sim_config:
@@ -180,6 +181,22 @@ class MuJoCoUR3PushBaseEnv(BasePushEnv):
     def reset_robot_qpos(self):
         for name, value in self.initial_qpos_dict.items():
             mujoco_utils.set_joint_qpos(self.model, self.data, name, value)
+            # Zero the velocity for this joint to prevent residual velocities
+            # from breaking gripper equality constraints during the first mj_step
+            dofadr = self.model.joint(name).dofadr[0]
+            self.data.qvel[dofadr] = 0.0
+            # If it's a finger joint, also set both position and velocity ctrl signals
+            if name == "finger_joint":
+                try:
+                    actuator_id = self.model.actuator("pos_finger").id
+                    self.data.ctrl[actuator_id] = value
+                except ValueError:
+                    pass
+                try:
+                    v_actuator_id = self.model.actuator("v_servo_finger").id
+                    self.data.ctrl[v_actuator_id] = 0.0  # lock: zero velocity command
+                except ValueError:
+                    pass
         mujoco.mj_forward(self.model, self.data)
 
     def reload_model(self, use_target_pose_as_obj_pose=False):

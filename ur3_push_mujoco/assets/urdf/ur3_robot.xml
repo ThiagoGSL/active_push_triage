@@ -93,7 +93,7 @@
                 <geom class="ur_visual" mesh="v_wrist3" pos="0 -0.00255 -0.082" quat="0.707107 0.707107 0 0"/>
                 <geom class="collision" mesh="c_wrist3" pos="0 -0.00255 -0.082" quat="0.707107 0.707107 0 0"/>
                 
-                <site name="pinch_site" pos="0 0 0.195" size="0.005" rgba="1 0 0 1" group="2"/>
+                <site name="pinch_site" pos="0 0 0.230" size="0.005" rgba="1 0 0 1" group="2"/>
 
                 <geom name="v_gripper_base" class="gripper_visual" mesh="v_gripper_base"/>
                 <geom class="collision" mesh="c_gripper_base"/>
@@ -149,6 +149,13 @@
     <exclude body1="wrist_2_link" body2="wrist_3_link"/>
     <exclude body1="wrist_3_link" body2="left_outer_knuckle"/>
     <exclude body1="wrist_3_link" body2="right_outer_knuckle"/>
+    <!-- Exclusões internas da garra RG2: knuckles colidem entre si quando fechada -->
+    <exclude body1="left_outer_knuckle" body2="left_inner_knuckle"/>
+    <exclude body1="left_outer_knuckle" body2="right_inner_knuckle"/>
+    <exclude body1="right_outer_knuckle" body2="right_inner_knuckle"/>
+    <exclude body1="right_outer_knuckle" body2="left_inner_knuckle"/>
+    <exclude body1="left_inner_knuckle" body2="right_inner_knuckle"/>
+    <exclude body1="left_inner_finger" body2="right_inner_finger"/>
   </contact>
 
   <actuator>

@@ -52,8 +52,7 @@ class CustomCheckpointCallback(BaseCallback):
 
             # save new checkpoint
             os.makedirs(self.cp_path, exist_ok=False)
-            self.model.save_replay_buffer(path=os.path.join(self.cp_path,"replay_buffer")) # save replay buffer
-            self.model.save(path=os.path.join(self.cp_path,"model")) # save last model 
+            self.model.save(path=os.path.join(self.cp_path,"model")) # save model
             # save RNG states
             with open(os.path.join(self.cp_path,"rng_states_gymenvs.pkl"), mode="wb") as rng_env_file:
                 pickle.dump(rng_states_envs, rng_env_file)

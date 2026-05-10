@@ -1,7 +1,6 @@
 import argparse, sys, os
 import cv2 as cv
 import tensorboard, ray, mujoco
-import ur3_push
 from stable_baselines3.common.utils import get_system_info
 from copy import deepcopy
 
@@ -75,10 +74,11 @@ def parse_args():
     # callback config
     ############################################
     cb_group = config_parser.add_argument_group("SB3 callbacks", "params SB3 callbacks")
-    cb_group.add_argument("--logDir", type=str, default=os.getenv("PANDA_PUSH_DATAPATH"), help="directory where to save log files and best model")
+    cb_group.add_argument("--logDir", type=str, default=os.getenv("UR3_PUSH_DATAPATH"), help="directory where to save log files and best model")
     cb_group.add_argument("--commentLogPath", type=str, default="", help="Comment added to log directory")
     cb_group.add_argument("--maxTrainEpisodes", type=int, default=580, help="callback: StopTrainingOnMaxEpisodes: stops training after maxTrainEpisodes * num_train episodes regardless of totalLearningTimesteps")
     cb_group.add_argument("--evalFreq", type=int, default=int(5000/train_eval_config.numTrain), help="callback: EvalCallback; evaluate model after num_train*eval_freq steps")
+    cb_group.add_argument("--saveFreq", type=int, default=int(10000/train_eval_config.numTrain), help="callback: CustomCheckpointCallback; save model after num_train*save_freq steps")
     cb_group.add_argument("--nEvalEpisodes", type=int, default=100, help="callback: EvalCallback; number of episodes to test the agent")
     cb_group.add_argument("--determinsticEvalPolicy", type=int, choices=[0, 1], default=1, help="callback: EvalCallback; whether to use deterministic actions")
 
@@ -180,8 +180,7 @@ def get_system_info_dict():
     env_info.update({"OpenCV" : cv.__version__,
                     "Tensorboard": tensorboard.__version__,
                     "Ray" : ray.__version__, 
-                    "MuJoCo": mujoco.__version__,
-                    "ur3_push" : ur3_push.__version__})
+                    "MuJoCo": mujoco.__version__})
     return env_info
 
 def linear_lr_schedule(initial_value):

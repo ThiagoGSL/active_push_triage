@@ -26,12 +26,18 @@ class MuJoCoUR3PushSimpleEnv(MuJoCoUR3PushBaseEnv):
         # initial joint pos — UR3 ready pose (garra acima da mesa de trabalho)
         # Ângulos em radianos: configuração de elbow-up padrão para pushing
         initial_qpos_dict = {
-                "shoulder_pan_joint":  -1.5708,   # -90°  (aponta o braço para frente)
+                "shoulder_pan_joint":   0.0,      #   0°  (aponta o braço para frente, em direção a mesa)
                 "shoulder_lift_joint": -1.5708,   # -90°  (elbow up)
                 "elbow_joint":          1.5708,   #  90°  (antebraço paralelo à mesa)
                 "wrist_1_joint":       -1.5708,   # -90°
                 "wrist_2_joint":       -1.5708,   # -90°
-                "wrist_3_joint":        0.0       #   0°  (garra orientada para baixo)
+                "wrist_3_joint":        0.0,      #   0°  (garra orientada para baixo)
+                "finger_joint":               0.700,    # Master joint (fechada sem auto-penetração: qmax=0.785 causava self-contact de 9mm)
+                "right_outer_knuckle_joint": -0.700,
+                "left_inner_knuckle_joint":  -0.700,
+                "right_inner_knuckle_joint": -0.700,
+                "left_inner_finger_joint":    0.700,
+                "right_inner_finger_joint":   0.700
             }
         
         # params
@@ -45,7 +51,7 @@ class MuJoCoUR3PushSimpleEnv(MuJoCoUR3PushBaseEnv):
                                 initial_qpos_dict=initial_qpos_dict,
                                 load_fingertip_model=self.use_fingertip_sensor,
                                 render_mode=render_mode,
-                                object_params={"range_x_pos":np.array([-0.15,0.15]),
+                                object_params={"range_x_pos":np.array([0.2,0.45]),
                                                 "range_y_pos":np.array([-0.15,0.15])},
                                 object_reset_options=object_reset_options,
                                 fixed_object_height=fixed_object_height,

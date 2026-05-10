@@ -251,7 +251,7 @@ class BasePushEnv(BaseGoalEnv):
         # sample y-pos 
         y_pos = self.initial_ee_xypos[1] + self.np_random.uniform(np.amin(self.range_obj_y_pos), np.amax(self.range_obj_y_pos))
 
-        pos = np.array([x_pos, y_pos, obj_height + self.height_table])
+        pos = np.array([x_pos, y_pos, obj_height + self.height_table + 0.001])
         quat = rotations_utils.mujocoQuat_to_tftransformationsQuat(rotations.euler2quat(np.array([0,0,z_angle]))) # tf.transformations order
 
         return pos, quat

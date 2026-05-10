@@ -105,13 +105,19 @@ def generate_model_xml_string(
     
     # Update table
     if use_sim_config:
-        table_height = 0.4
-        table_pos = f"0.525 0.0 {table_height/2}"
-        table_size = f"0.35 0.45 {table_height/2}"
+        table_surface_z = 0.02      # Z of table TOP surface (where robot pushes objects)
+        table_thickness = 0.4       # thick table extending DOWNWARD to prevent collision tunneling
+        table_height = table_surface_z  # used for object spawn Z calculation
+        table_center_z = table_surface_z - table_thickness / 2  # center is below surface
+        table_pos = f"0.525 0.0 {table_center_z}"
+        table_size = f"0.35 0.45 {table_thickness / 2}"
     else:
-        table_height = 0.385
-        table_pos = f"0.0 0.595 {table_height/2}"
-        table_size = f"0.45 {0.35 + 0.06} {table_height/2}"
+        table_surface_z = 0.02
+        table_thickness = 0.4
+        table_height = table_surface_z
+        table_center_z = table_surface_z - table_thickness / 2
+        table_pos = f"0.0 0.595 {table_center_z}"
+        table_size = f"0.45 {0.35 + 0.06} {table_thickness / 2}"
 
     table = worldbody.find("./geom[@name='table']")
     if table is not None:
@@ -122,20 +128,29 @@ def generate_model_xml_string(
     # Update target
     target_body = worldbody.find("./body[@name='target']")
     if target_body is not None:
-        target_body.set("pos", f"{target_xy_pos[0]} {target_xy_pos[1]} {table_height + obj_height}")
+        target_body.set("pos", f"{target_xy_pos[0]} {target_xy_pos[1]} {table_height + obj_height + 0.001}")
         target_body.set("quat", f"{target_quat[0]} {target_quat[1]} {target_quat[2]} {target_quat[3]}")
+        
+        # Remove joint so it stays fixed
+        joint = target_body.find("joint")
+        if joint is not None:
+            target_body.remove(joint)
+
         target_geom = target_body.find("./geom[@name='target_geom']")
         if target_geom is not None:
             geom_size_str = f"{obj_size_0} {obj_height}" if obj_type == "cylinder" else f"{obj_size_0} {obj_size_1} {obj_height}"
             target_geom.set("size", geom_size_str)
             target_geom.set("type", obj_type)
-            target_geom.set("mass", str(obj_mass))
-            target_geom.set("friction", f"{obj_sliding_fric} {obj_torsional_fric} 0.0001")
+            target_geom.set("contype", "0")
+            target_geom.set("conaffinity", "0")
+            target_geom.set("rgba", "0 1 0 0.5") # Green semi-transparent
+            target_geom.set("mass", "0")
+            target_geom.set("friction", "0 0 0")
 
     # Update object
     object_body = worldbody.find("./body[@name='object']")
     if object_body is not None:
-        object_body.set("pos", f"{obj_xy_pos[0]} {obj_xy_pos[1]} {table_height + obj_height}")
+        object_body.set("pos", f"{obj_xy_pos[0]} {obj_xy_pos[1]} {table_height + obj_height + 0.001}")
         object_body.set("quat", f"{obj_quat[0]} {obj_quat[1]} {obj_quat[2]} {obj_quat[3]}")
         object_geom = object_body.find("./geom[@name='object_geom']")
         if object_geom is not None:
@@ -165,12 +180,13 @@ def generate_model_xml_string(
         actuator = root.find("actuator")
         if actuator is None:
             actuator = ET.SubElement(root, "actuator")
-        ET.SubElement(actuator, "velocity", name="v_servo_shoulder_pan", joint="shoulder_pan_joint", kv="30")
+        ET.SubElement(actuator, "velocity", name="v_servo_shoulder_pan",  joint="shoulder_pan_joint",  kv="30")
         ET.SubElement(actuator, "velocity", name="v_servo_shoulder_lift", joint="shoulder_lift_joint", kv="30")
-        ET.SubElement(actuator, "velocity", name="v_servo_elbow", joint="elbow_joint", kv="30")
-        ET.SubElement(actuator, "velocity", name="v_servo_wrist_1", joint="wrist_1_joint", kv="30")
-        ET.SubElement(actuator, "velocity", name="v_servo_wrist_2", joint="wrist_2_joint", kv="10")
-        ET.SubElement(actuator, "velocity", name="v_servo_wrist_3", joint="wrist_3_joint", kv="10")
+        ET.SubElement(actuator, "velocity", name="v_servo_elbow",         joint="elbow_joint",         kv="30")
+        ET.SubElement(actuator, "velocity", name="v_servo_wrist_1",       joint="wrist_1_joint",       kv="30")
+        ET.SubElement(actuator, "velocity", name="v_servo_wrist_2",       joint="wrist_2_joint",       kv="10")
+        ET.SubElement(actuator, "velocity", name="v_servo_wrist_3",       joint="wrist_3_joint",       kv="10")
+        ET.SubElement(actuator, "velocity", name="v_servo_finger",        joint="finger_joint",        kv="50")
 
     # Convert tree back to string
     return ET.tostring(root, encoding="utf8").decode("utf8")

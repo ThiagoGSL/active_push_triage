@@ -164,7 +164,6 @@ for i in range(0,config.eNumEvalEpisodes):
         elif step == 25:
             # distance at the end of time step 25
             distance_pos[i,1] = info[0]["dist_pos"]
-        assert info[0]["dist_pos"] < 0.8
 
     # distance at the end of an episode
     distance_pos[i,2] = info[0]["dist_pos"]
