@@ -1,0 +1,8 @@
+<library path="lib/libur3_push_control">
+  <class name="ur3_push_control/JointVelocityPushController" type="ur3_push_control::JointVelocityPushController" base_class_type="controller_interface::ControllerBase">
+    <description>
+      A controller that does velocity control in task space and solves cone task, position task and initial joint config task.
+    </description>
+  </class>
+  
+</library>
