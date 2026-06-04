@@ -57,12 +57,18 @@ class MuJoCoUR3PushEnv(MuJoCoUR3PushBaseEnv):
             # UR3 ready pose (sim) — garra acima da mesa, elbow-up
             # Posição end-effector aprox.: [0.40, 0, 0.55]
             initial_qpos_dict = {
-                    "shoulder_pan_joint":  -1.5708,   # -90°
+                    "shoulder_pan_joint":   0.0,      #   0°
                     "shoulder_lift_joint": -1.5708,   # -90°  (elbow up)
                     "elbow_joint":          1.5708,   #  90°
                     "wrist_1_joint":       -1.5708,   # -90°
                     "wrist_2_joint":       -1.5708,   # -90°
-                    "wrist_3_joint":        0.0       #   0°
+                    "wrist_3_joint":        0.0,      #   0°
+                    "finger_joint":               0.785398,
+                    "right_outer_knuckle_joint": -0.785398,
+                    "left_inner_knuckle_joint":  -0.785398,
+                    "right_inner_knuckle_joint": -0.785398,
+                    "left_inner_finger_joint":    0.785398,
+                    "right_inner_finger_joint":   0.785398
                 }
         else:
             # UR3 ready pose (real) — alinhada com o referencial da câmara real
@@ -73,7 +79,13 @@ class MuJoCoUR3PushEnv(MuJoCoUR3PushBaseEnv):
                     "elbow_joint":          1.5708,
                     "wrist_1_joint":       -1.5708,
                     "wrist_2_joint":       -1.5708,
-                    "wrist_3_joint":        1.5708    # +90° para alinhar com câmara real
+                    "wrist_3_joint":        1.5708,   # +90° para alinhar com câmara real
+                    "finger_joint":               0.785398,
+                    "right_outer_knuckle_joint": -0.785398,
+                    "left_inner_knuckle_joint":  -0.785398,
+                    "right_inner_knuckle_joint": -0.785398,
+                    "left_inner_finger_joint":    0.785398,
+                    "right_inner_finger_joint":   0.785398
                 }
         
         # params
@@ -92,16 +104,16 @@ class MuJoCoUR3PushEnv(MuJoCoUR3PushBaseEnv):
         if use_sim_config:
             default_camera_config = DEFAULT_CAMERA_CONFIG_SIM
             if "range_x_pos" not in object_params.keys():
-                object_params.update({"range_x_pos": np.array([-0.1,0.1])})
+                object_params.update({"range_x_pos": np.array([0.2,0.45])})
             if "range_y_pos" not in object_params.keys():
-                object_params.update({"range_y_pos": np.array([-0.1,0.1])})
+                object_params.update({"range_y_pos": np.array([-0.15,0.15])})
             
         else:
             default_camera_config = DEFAULT_CAMERA_CONFIG_REAL
             if "range_x_pos" not in object_params.keys():
-                object_params.update({"range_x_pos": np.array([-0.13,0.13])})
+                object_params.update({"range_x_pos": np.array([0.2,0.45])})
             if "range_y_pos" not in object_params.keys():
-                object_params.update({"range_y_pos": np.array([-0.13,0.13])})
+                object_params.update({"range_y_pos": np.array([-0.15,0.15])})
                 
         MuJoCoUR3PushBaseEnv.__init__(self,
                                         initial_qpos_dict=initial_qpos_dict,
@@ -137,7 +149,7 @@ class MuJoCoUR3PushEnv(MuJoCoUR3PushBaseEnv):
             self.tactile_sensor_max_value = 10
 
         # load trained VAE
-        self.data_path = os.getenv("PANDA_PUSH_DATAPATH")
+        self.data_path = os.getenv("UR3_PUSH_DATAPATH")
         self.latent_dim = latent_dim
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         assert self.image_height == self.image_width
@@ -161,7 +173,13 @@ class MuJoCoUR3PushEnv(MuJoCoUR3PushBaseEnv):
         if self.encode_ee_pos:
             shape_ee_observation = self.latent_dim
         else:
-            shape_ee_observation = 3+int(self.latent_dim is None) if self.use_fingertip_sensor else 2
+            if self.latent_dim is None:
+                # Ground-truth mode: observation enriched with obj_pos + relative distances
+                # ee_pos[2] + (cos/sin[2] if fingertip) + obj_pos[2] + ee→obj[2] + obj→target[2]
+                shape_ee_observation = (4 if self.use_fingertip_sensor else 2) + 6
+            else:
+                # VAE latent mode: standard ee pose only (unchanged)
+                shape_ee_observation = 3 if self.use_fingertip_sensor else 2
         self.single_obs_length = shape_sensor_output + shape_ee_observation
         self.single_ag_length = self.latent_dim if self.latent_dim is not None else 2 + 2*int(self.consider_object_orientation)
         
@@ -383,6 +401,15 @@ class MuJoCoUR3PushEnv(MuJoCoUR3PushBaseEnv):
             if self.encode_ee_pos:
                 ee_pose = latent_vecs[2].cpu().numpy()
             
+        # Enrich observation with ground-truth relative distances (non-latent, non-encoded mode)
+        #   ee→obj: approach phase   |   obj→target: push phase
+        if self.latent_dim is None and not self.encode_ee_pos:
+            obj_pos_2d = achieved_goal[:2].astype(np.float32)
+            target_pos_2d = desired_goal[:2].astype(np.float32)
+            ee_to_obj = obj_pos_2d - ee_pose[:2]
+            obj_to_target = target_pos_2d - obj_pos_2d
+            ee_pose = np.concatenate([ee_pose, obj_pos_2d, ee_to_obj, obj_to_target])
+
         # concat observation
         if self.use_fingertip_sensor:
             observation = np.append(sensor_data, ee_pose)

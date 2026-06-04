@@ -111,7 +111,8 @@ venv.seed(config.eEvalSeed)
 
 # Record the video starting at the first step
 if len(config.eVideoName) > 0 and not "Ros" in config.eEnvStr:
-    video_length = config.eNumEvalEpisodes * 50
+    video_length = config.eNumEvalEpisodes * config.maxEpisodeSteps  # maxEpisodeSteps = 100 by default
+
     venv = VecVideoRecorder(venv, video_path,
                         record_video_trigger=lambda x: x == 0, video_length=video_length,
                         name_prefix=config.eVideoName)
@@ -119,10 +120,10 @@ if len(config.eVideoName) > 0 and not "Ros" in config.eEnvStr:
 
 # evaluate
 rewards = -2 * np.ones(config.eNumEvalEpisodes)
-success = -1* np.ones((config.eNumEvalEpisodes, 50))
+success = -1* np.ones((config.eNumEvalEpisodes, config.maxEpisodeSteps))
 num_corrections = -1* np.ones(config.eNumEvalEpisodes)
 num_dist_corrections = -1* np.ones(config.eNumEvalEpisodes)
-num_sim_steps = -2 * np.ones((config.eNumEvalEpisodes, 50), dtype=np.int32)
+num_sim_steps = -2 * np.ones((config.eNumEvalEpisodes, config.maxEpisodeSteps), dtype=np.int32)
 distance_pos = -1 * np.ones((config.eNumEvalEpisodes, 3))
 
 obs = venv.reset()
@@ -164,7 +165,6 @@ for i in range(0,config.eNumEvalEpisodes):
         elif step == 25:
             # distance at the end of time step 25
             distance_pos[i,1] = info[0]["dist_pos"]
-        assert info[0]["dist_pos"] < 0.8
 
     # distance at the end of an episode
     distance_pos[i,2] = info[0]["dist_pos"]

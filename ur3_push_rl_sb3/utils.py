@@ -1,7 +1,6 @@
 import argparse, sys, os
 import cv2 as cv
 import tensorboard, ray, mujoco
-import ur3_push
 from stable_baselines3.common.utils import get_system_info
 from copy import deepcopy
 
@@ -25,12 +24,14 @@ def parse_args():
     # params gym env
     ############################################
     gym_env_group = config_parser.add_argument_group("gymnasium environments", "params gymnasium environment (params are used for all train and test envs)")
-    gym_env_group.add_argument("--sparseReward", type=int, choices=[0, 1], default=1, help="use sparse reward?")
-    gym_env_group.add_argument("--groundTruthDenseReward", type=int, choices=[0,1], default=0, help="use ground truth dense reward? (only used if ee='fingertip')")
+    gym_env_group.add_argument("--sparseReward", type=int, choices=[0, 1], default=0, help="use sparse reward? (0: dense ground-truth recommended for PPO)")
+    gym_env_group.add_argument("--groundTruthDenseReward", type=int, choices=[0,1], default=1, help="use ground truth dense reward -dist(obj,target)? (recommended for PPO without HER)")
+    gym_env_group.add_argument("--eeToObjRewardScale", type=float, default=0.2, help="reward shaping: scale for EE\u2192object distance penalty added to the push reward (0=disabled); guides the approach phase so PPO learns to touch the object before pushing")
     gym_env_group.add_argument("--considerObjectOrientation", type=int, choices=[0, 1], default=0, help="consider object orientation in reward function?")
-    gym_env_group.add_argument("--actionScalingFactor", type=float, default=1.0, help="x,y actions are multiplied by this factor (not used in case of action scaling env)")
+    gym_env_group.add_argument("--actionScalingFactor", type=float, default=0.05, help="x,y actions are multiplied by this factor (not used in case of action scaling env)")
     gym_env_group.add_argument("--numSimSteps", type=int, default=120, help="number of simulation steps that are executed if gym.step() is called (-1: RL agent learns number of sim steps)")
     gym_env_group.add_argument("--safetyDQScale", type=float, default=1.0, help="Safety scaling factor for desired velocities")
+    gym_env_group.add_argument("--maxEpisodeSteps", type=int, default=100, help="maximum number of steps per episode (applied via TimeLimit wrapper); must be consistent with max_episode_length in ur3_push_env.py when using obs history")
     gym_env_group.add_argument("--latentDim", type=lambda x: None if x == 'None' else int(x), default=6, help="number of VAE latent dimensions")
     gym_env_group.add_argument("--fixedObjectHeight", type=lambda x: None if x == 'None' else float(x), default=0.023, help="Use fixed object height? No: None, Yes: float; Training: uses a VAE was trained with the same value")
     gym_env_group.add_argument("--encodeEEPos", type=int, choices=[0, 1], default=0, help="use latent ee state in observation? (not used if envStr='MujocoUR3PushSimpleEnv')")
@@ -64,7 +65,7 @@ def parse_args():
     ppo_group.add_argument("--nEpochs", type=int, default=10, help="number of epochs when optimizing the surrogate loss")
     ppo_group.add_argument("--gamma", type=float, default=0.99, help="discount factor")
     ppo_group.add_argument("--clipRange", type=float, default=0.2, help="clipping parameter for the value function")
-    ppo_group.add_argument("--entCoef", type=float, default=0.0, help="entropy regularization coefficient")
+    ppo_group.add_argument("--entCoef", type=float, default=0.01, help="entropy regularization coefficient (>0 avoids premature convergence to a fixed behaviour)")
     ppo_group.add_argument("--policyNetArch", nargs="+", type=int, default=[128,256,64], help="size of MLP used for actor and critic")
     ppo_group.add_argument("--shareFeatExtractor", type=int, default=0, help="whether to share features extractor between actor and critic)")
     ppo_group.add_argument("--useGRUFeatExtractor", type=int, choices=[0, 1], default=0, help="whether to use a custom GRU feature extractor (otherwise: SB3 CombinedExtractor is used)")
@@ -75,10 +76,11 @@ def parse_args():
     # callback config
     ############################################
     cb_group = config_parser.add_argument_group("SB3 callbacks", "params SB3 callbacks")
-    cb_group.add_argument("--logDir", type=str, default=os.getenv("PANDA_PUSH_DATAPATH"), help="directory where to save log files and best model")
+    cb_group.add_argument("--logDir", type=str, default=os.getenv("UR3_PUSH_DATAPATH"), help="directory where to save log files and best model")
     cb_group.add_argument("--commentLogPath", type=str, default="", help="Comment added to log directory")
-    cb_group.add_argument("--maxTrainEpisodes", type=int, default=580, help="callback: StopTrainingOnMaxEpisodes: stops training after maxTrainEpisodes * num_train episodes regardless of totalLearningTimesteps")
+    cb_group.add_argument("--maxTrainEpisodes", type=int, default=100000, help="callback: StopTrainingOnMaxEpisodes: stops training after maxTrainEpisodes * num_train episodes regardless of totalLearningTimesteps (set high to let totalLearningTimesteps control training end)")
     cb_group.add_argument("--evalFreq", type=int, default=int(5000/train_eval_config.numTrain), help="callback: EvalCallback; evaluate model after num_train*eval_freq steps")
+    cb_group.add_argument("--saveFreq", type=int, default=int(10000/train_eval_config.numTrain), help="callback: CustomCheckpointCallback; save model after num_train*save_freq steps")
     cb_group.add_argument("--nEvalEpisodes", type=int, default=100, help="callback: EvalCallback; number of episodes to test the agent")
     cb_group.add_argument("--determinsticEvalPolicy", type=int, choices=[0, 1], default=1, help="callback: EvalCallback; whether to use deterministic actions")
 
@@ -91,7 +93,7 @@ def parse_args():
     eval_group.add_argument("--eConsiderObjectOrientation", type=int, choices=[0, 1], default=0, help="consider object orientation in reward function?")
     eval_group.add_argument("--eDeterministicEvalPolicy", type=int, choices=[0, 1], default=1, help="whether to use deterministic actions")
     eval_group.add_argument("--eNumEvalEpisodes", type=int, default=100, help="number of evaluation episodes")
-    eval_group.add_argument("--eActionScalingFactor", type=float, default=1.0, help="x,y actions are multiplied by this factor (not used in case of action scaling env)")
+    eval_group.add_argument("--eActionScalingFactor", type=float, default=0.05, help="x,y actions are multiplied by this factor (not used in case of action scaling env)")
     eval_group.add_argument("--eNumSimSteps", type=int, default=120, help="number of simulation steps that are executed if gym.step() is called")
     eval_group.add_argument("--eSafetyDQScale", type=float, default=1.0, help="Safety scaling factor for desired velocities")
     eval_group.add_argument("--eObjType", type=lambda x: None if x == 'None' else str(x), default=None, help="object type; None (default): random, '': initial value is not changed, 'box' or 'cylinder'")
@@ -180,8 +182,7 @@ def get_system_info_dict():
     env_info.update({"OpenCV" : cv.__version__,
                     "Tensorboard": tensorboard.__version__,
                     "Ray" : ray.__version__, 
-                    "MuJoCo": mujoco.__version__,
-                    "ur3_push" : ur3_push.__version__})
+                    "MuJoCo": mujoco.__version__})
     return env_info
 
 def linear_lr_schedule(initial_value):

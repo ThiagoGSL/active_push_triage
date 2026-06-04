@@ -11,7 +11,7 @@ parser.add_argument("--useSimConfig", type=int, choices=[0, 1], default=1, help=
 config = parser.parse_args()
 
 # params
-data_path = os.getenv("PANDA_PUSH_DATAPATH")
+data_path = os.getenv("UR3_PUSH_DATAPATH")
 seed = 100 # seed used to generate images
 image_size = 64 # height = width
 
