@@ -147,6 +147,8 @@ def main():
     
     
         if continue_train in ["", "r"]: # train new model
+            # garante que o diretório de logs existe (WarpVecEnv não cria via Monitor)
+            os.makedirs(log_path, exist_ok=True)
             # save config
             with open(os.path.join(log_path,"config.txt"),"w") as f:
                 json.dump(config.__dict__, f, indent=2)
@@ -203,10 +205,17 @@ def main():
     
         # callbacks
         stop_train_cb = StopTrainingOnMaxEpisodes(max_episodes=config.maxTrainEpisodes, verbose=1)
+        # Para Warp, evalFreq ja foi calculado com base em numTrain no utils.py,
+        # e o EvalCallback conta em gym steps (cada step = 1 no WarpVecEnv, mas envolve N mundos).
+        # Nao dividir novamente por numTrain para evitar avaliacao a cada step.
+        if getattr(config, 'useWarp', 0):
+            eval_freq_steps = max(1, config.evalFreq)  # ja em gym steps
+        else:
+            eval_freq_steps = max(1, int(config.evalFreq / config.numTrain))
         eval_cb = EvalCallback( eval_env, 
                                 best_model_save_path=eval_path,
                                 log_path=eval_path, 
-                                eval_freq=max(1, int(config.evalFreq / config.numTrain)), 
+                                eval_freq=eval_freq_steps,
                                 n_eval_episodes=config.nEvalEpisodes,
                                 deterministic=config.determinsticEvalPolicy)
         checkpoint_cb = CustomCheckpointCallback(

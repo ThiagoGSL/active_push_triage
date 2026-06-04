@@ -159,7 +159,14 @@ class MuJoCoUR3PushSimpleWarpEnv:
         return qpos
 
     def _capture_cuda_graph(self):
-        """Captura o CUDA graph para o substep loop (rápido após warmup)."""
+        """Captura o CUDA graph para o substep loop (apenas na primeira vez).
+
+        O graph e estatico em relacao aos dados: pode ser relancado
+        mesmo apos mudanca de qpos/ctrl, pois acessa os buffers por ponteiro.
+        NAO recapture em cada reset — e extremamente lento.
+        """
+        if self._graph_captured:
+            return  # ja capturado, nao recaptura
         with wp.ScopedCapture() as capture:
             for _ in range(self.n_substeps):
                 mjw.step(self._m_gpu, self._d_gpu)
@@ -216,12 +223,14 @@ class MuJoCoUR3PushSimpleWarpEnv:
         wp.copy(self._d_gpu.qvel, wp.from_numpy(qvel_zeros, dtype=wp.float32))
         wp.synchronize()
 
-        # Forward para atualizar cinemática na GPU
-        mjw.step(self._m_gpu, self._d_gpu)
+        # Forward para atualizar cinematica na GPU
+        if self._graph_captured:
+            wp.capture_launch(self._cuda_graph)
+        else:
+            # Primeiro reset: faz um step normal para warmup e depois captura o graph
+            mjw.step(self._m_gpu, self._d_gpu)
+            self._capture_cuda_graph()
         wp.synchronize()
-
-        # (Re)captura CUDA graph após mudança de estado
-        self._capture_cuda_graph()
 
         return self._get_obs_batch()
 
