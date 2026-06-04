@@ -41,14 +41,18 @@ class CustomCheckpointCallback(BaseCallback):
                 shutil.rmtree(self.cp_path) 
             
             # RNG states of all Gymnasium environments
+            # (opcional: WarpVecEnv nao expoe rng_states por mundo)
             rng_states_envs = {}
-            # train envs
-            rng_states_tmp = self.train_envs.get_attr("rng_states")
-            for i in range(0, self.train_envs.num_envs):
-                rng_states_envs.update({i: rng_states_tmp[i]})
-            # eval env
-            rng_states_tmp = self.eval_env.get_attr("rng_states")
-            rng_states_envs.update({self.train_envs.num_envs: rng_states_tmp[0]})
+            try:
+                # train envs
+                rng_states_tmp = self.train_envs.get_attr("rng_states")
+                for i in range(0, self.train_envs.num_envs):
+                    rng_states_envs.update({i: rng_states_tmp[i]})
+                # eval env
+                rng_states_tmp = self.eval_env.get_attr("rng_states")
+                rng_states_envs.update({self.train_envs.num_envs: rng_states_tmp[0]})
+            except (AttributeError, NotImplementedError):
+                pass  # WarpVecEnv: sem rng_states por mundo (GPU nao tem RNG sequencial)
 
             # save new checkpoint
             os.makedirs(self.cp_path, exist_ok=False)
