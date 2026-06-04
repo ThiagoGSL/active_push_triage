@@ -106,6 +106,11 @@ def main():
                 "use_obs_history": config.useGRUFeatExtractor,
                 "num_stack_obs": config.numStackedObs
             })
+        else:
+            # SimpleEnv-specific params
+            env_kwargs.update({
+                "ee_to_obj_reward_scale": config.eeToObjRewardScale
+            })
     
         env_kwargs.update({"render_mode": "rgb_array",
                             "use_sim_config": config.useSimConfig,
@@ -122,7 +127,8 @@ def main():
                                             config.trainSeed, 
                                             config.evalSeed, 
                                             rng_states_envs,
-                                            override_monitor_logs, 
+                                            override_monitor_logs,
+                                            max_episode_steps=config.maxEpisodeSteps,
                                             **env_kwargs)
     
     
@@ -186,7 +192,7 @@ def main():
         eval_cb = EvalCallback( eval_env, 
                                 best_model_save_path=eval_path,
                                 log_path=eval_path, 
-                                eval_freq=config.evalFreq, 
+                                eval_freq=max(1, int(config.evalFreq / config.numTrain)), 
                                 n_eval_episodes=config.nEvalEpisodes,
                                 deterministic=config.determinsticEvalPolicy)
         checkpoint_cb = CustomCheckpointCallback(

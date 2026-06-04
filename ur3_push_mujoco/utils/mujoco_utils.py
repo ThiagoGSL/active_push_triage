@@ -180,12 +180,12 @@ def generate_model_xml_string(
         actuator = root.find("actuator")
         if actuator is None:
             actuator = ET.SubElement(root, "actuator")
-        ET.SubElement(actuator, "velocity", name="v_servo_shoulder_pan",  joint="shoulder_pan_joint",  kv="30")
-        ET.SubElement(actuator, "velocity", name="v_servo_shoulder_lift", joint="shoulder_lift_joint", kv="30")
-        ET.SubElement(actuator, "velocity", name="v_servo_elbow",         joint="elbow_joint",         kv="30")
+        ET.SubElement(actuator, "velocity", name="v_servo_shoulder_pan",  joint="shoulder_pan_joint",  kv="50")
+        ET.SubElement(actuator, "velocity", name="v_servo_shoulder_lift", joint="shoulder_lift_joint", kv="50")
+        ET.SubElement(actuator, "velocity", name="v_servo_elbow",         joint="elbow_joint",         kv="50")
         ET.SubElement(actuator, "velocity", name="v_servo_wrist_1",       joint="wrist_1_joint",       kv="30")
-        ET.SubElement(actuator, "velocity", name="v_servo_wrist_2",       joint="wrist_2_joint",       kv="10")
-        ET.SubElement(actuator, "velocity", name="v_servo_wrist_3",       joint="wrist_3_joint",       kv="10")
+        ET.SubElement(actuator, "velocity", name="v_servo_wrist_2",       joint="wrist_2_joint",       kv="20")
+        ET.SubElement(actuator, "velocity", name="v_servo_wrist_3",       joint="wrist_3_joint",       kv="20")
         ET.SubElement(actuator, "velocity", name="v_servo_finger",        joint="finger_joint",        kv="50")
 
     # Convert tree back to string
@@ -288,6 +288,10 @@ class MuJoCoUR3PushController():
 
         jac_conepos_pinv = controller_utils.pinv(jac_conepos, use_damping=self.use_sim_config)
         dq_d = jac_conepos_pinv @ conepos_error
+
+        # Apply proportional gain (Kp) to convert position error to velocity command.
+        # Without this, Kp is implicitly 1.0, causing extremely sluggish tracking.
+        dq_d = dq_d * 10.0
 
         # set desired joint velocities and ensure joint position and velocity limits
         data.ctrl[self.panda_actuator_ids] = self.ensure_joint_pos_velo_limits(data, dq_d)

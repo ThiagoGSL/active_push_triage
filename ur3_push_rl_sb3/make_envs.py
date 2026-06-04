@@ -1,8 +1,9 @@
 import logging, os
 import gymnasium as gym
+from gymnasium.wrappers import TimeLimit
 from stable_baselines3.common.monitor import Monitor
 
-def make_vec_envs(env_str, env_has_id, log_path, vec_env_cls, num_train, train_seed, eval_seed, rng_states_envs, override_monitor_logs, **env_kwargs):
+def make_vec_envs(env_str, env_has_id, log_path, vec_env_cls, num_train, train_seed, eval_seed, rng_states_envs, override_monitor_logs, max_episode_steps=None, **env_kwargs):
     # adapted from stable_baselines3 (make_vec_env), but correctly sets env_id and rng_states
     # train_seed: seed over all train environments. The i-th environment seed wille be set with i+seed
     # eval_seed: seed over all test environments. The i-th environment seed wille be set with i+seed
@@ -13,12 +14,15 @@ def make_vec_envs(env_str, env_has_id, log_path, vec_env_cls, num_train, train_s
         else:
             env = gym.envs.make(env_str, **env_kwargs)
 
+        # Seed / restore RNG state before any wrapper is applied
         if rng_states is None:
-            # seed
             env_seed = seed + env_id
             env.action_space.seed(env_seed)
         else:
             env.set_rng_states(rng_states)
+
+        if max_episode_steps is not None and max_episode_steps > 0:
+            env = TimeLimit(env, max_episode_steps=max_episode_steps)
 
         # Monitor wrapper
         os.makedirs(log_path, exist_ok=True)

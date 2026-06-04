@@ -109,7 +109,10 @@ class MuJoCoUR3PushBaseEnv(BasePushEnv):
         # extract information for sampling goals.
         initial_ee_pos = mujoco_utils.get_site_xpos(self.model, self.data, self.ee_site_name).copy()
         self.initial_ee_xypos = initial_ee_pos[:2]
-        self.initial_ee_zpos = initial_ee_pos[2]
+        # Força o Z inicial (altura de push) para 0.045m (mesa=0.02 + metade do obj~0.025)
+        # Se não travar isso, a cinemática inicial coloca o robô alto demais, 
+        # e ele passa por cima do objeto prensando ele contra a mesa
+        self.initial_ee_zpos = 0.045
         self.height_table = 0.02 # Z of table TOP surface in world frame (must match mujoco_utils.py table_surface_z)
 
 
@@ -185,17 +188,12 @@ class MuJoCoUR3PushBaseEnv(BasePushEnv):
             # from breaking gripper equality constraints during the first mj_step
             dofadr = self.model.joint(name).dofadr[0]
             self.data.qvel[dofadr] = 0.0
-            # If it's a finger joint, also set both position and velocity ctrl signals
+            # If it's a finger joint, lock velocity to zero via v_servo_finger
             if name == "finger_joint":
-                try:
-                    actuator_id = self.model.actuator("pos_finger").id
-                    self.data.ctrl[actuator_id] = value
-                except ValueError:
-                    pass
                 try:
                     v_actuator_id = self.model.actuator("v_servo_finger").id
                     self.data.ctrl[v_actuator_id] = 0.0  # lock: zero velocity command
-                except ValueError:
+                except (ValueError, KeyError):
                     pass
         mujoco.mj_forward(self.model, self.data)
 

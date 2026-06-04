@@ -173,7 +173,13 @@ class MuJoCoUR3PushEnv(MuJoCoUR3PushBaseEnv):
         if self.encode_ee_pos:
             shape_ee_observation = self.latent_dim
         else:
-            shape_ee_observation = 3+int(self.latent_dim is None) if self.use_fingertip_sensor else 2
+            if self.latent_dim is None:
+                # Ground-truth mode: observation enriched with obj_pos + relative distances
+                # ee_pos[2] + (cos/sin[2] if fingertip) + obj_pos[2] + ee→obj[2] + obj→target[2]
+                shape_ee_observation = (4 if self.use_fingertip_sensor else 2) + 6
+            else:
+                # VAE latent mode: standard ee pose only (unchanged)
+                shape_ee_observation = 3 if self.use_fingertip_sensor else 2
         self.single_obs_length = shape_sensor_output + shape_ee_observation
         self.single_ag_length = self.latent_dim if self.latent_dim is not None else 2 + 2*int(self.consider_object_orientation)
         
@@ -395,6 +401,15 @@ class MuJoCoUR3PushEnv(MuJoCoUR3PushBaseEnv):
             if self.encode_ee_pos:
                 ee_pose = latent_vecs[2].cpu().numpy()
             
+        # Enrich observation with ground-truth relative distances (non-latent, non-encoded mode)
+        #   ee→obj: approach phase   |   obj→target: push phase
+        if self.latent_dim is None and not self.encode_ee_pos:
+            obj_pos_2d = achieved_goal[:2].astype(np.float32)
+            target_pos_2d = desired_goal[:2].astype(np.float32)
+            ee_to_obj = obj_pos_2d - ee_pose[:2]
+            obj_to_target = target_pos_2d - obj_pos_2d
+            ee_pose = np.concatenate([ee_pose, obj_pos_2d, ee_to_obj, obj_to_target])
+
         # concat observation
         if self.use_fingertip_sensor:
             observation = np.append(sensor_data, ee_pose)
