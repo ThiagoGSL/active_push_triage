@@ -16,6 +16,7 @@ def parse_args():
     train_eval_group.add_argument("--envStr", type=str, default="MujocoUR3PushEnv", help="Gymnasium env id (str)")
     train_eval_group.add_argument("--useFingertipSensor", type=int, choices=[0, 1], default=0, help="use fingertip sensor data? (only used if ee='fingertip')")
     train_eval_group.add_argument("--useSimConfig", type=int, choices=[0, 1], default=1, help="use sim or real controller + camera config? (real controller config fixes some problems with the real robot controller")
+    train_eval_group.add_argument("--useWarp", type=int, choices=[0, 1], default=0, help="use MuJoCo Warp GPU-batched training? (1=WarpVecEnv, 0=SubprocVecEnv CPU). numTrain becomes nworld (N parallel GPU worlds). Requires NVIDIA GPU.")
 
     train_eval_config, _ = train_eval_parser.parse_known_args()
 

@@ -312,3 +312,192 @@ class MuJoCoUR3PushController():
         assert (dq <= self.dq_max).all()
 
         return dq
+
+
+class MuJoCoUR3PushControllerBatched:
+    """Controlador IK Jacobiano vetorizado para N mundos em paralelo (MuJoCo Warp).
+
+    Opera sobre arrays batched [N, ...] lidos da GPU via d.xxx.numpy().
+    O cálculo do Jacobiano usa o MuJoCo padrão (CPU) com um MjData auxiliar
+    por mundo, em um loop Python. O restante (cone error, pinv, clip) é NumPy.
+
+    Fluxo por gym step:
+        1. Ler site_xpos, site_xmat, qpos da GPU → NumPy [N, ...]
+        2. update_desired_pose_batched(ee_pos_batch, actions) → ee_pos_d [N, 3]
+        3. compute_ctrl_batched(qpos_batch, site_xpos_batch, site_xmat_batch, ee_pos_d_batch)
+           → ctrl_batch [N, n_arm_joints]
+        4. Escrever ctrl_batch na GPU → warp.copy(d.ctrl, wp.array(ctrl_batch))
+        5. Executar n_substeps via CUDA graph na GPU
+    """
+
+    def __init__(self,
+                 model: MjModel,
+                 robot_name: str,
+                 ee_site_name: str,
+                 initial_ee_zpos: float,
+                 min_ee_xy_pos: np.ndarray = np.array([0.1, -0.25]),
+                 max_ee_xy_pos: np.ndarray = np.array([0.65, 0.25]),
+                 use_sim_config: bool = True,
+                 safety_dq_scale: float = 1.0):
+
+        self.robot_name = robot_name
+        self.ee_site_name = ee_site_name
+        self.initial_ee_zpos = initial_ee_zpos
+        self.min_ee_xy_pos = min_ee_xy_pos
+        self.max_ee_xy_pos = max_ee_xy_pos
+        self.use_sim_config = use_sim_config
+        self.safety_dq_scale = safety_dq_scale
+
+        # Limites de velocidade e posição de junta (UR3, 6 GDL)
+        self.dq_max = np.array([3.14, 3.14, 3.14, 3.14, 3.14, 3.14])
+        self.dq_min = -self.dq_max
+        self.q_max = np.array([6.2831853] * 6)
+        self.q_min = -self.q_max
+
+        # Carrega IDs do modelo CPU (compartilhado entre mundos — modelo é estático)
+        self._model = model  # MjModel CPU (referência)
+        self._load_model_ids(model)
+
+        # MjData auxiliar CPU para cálculo de Jacobianos por mundo
+        # Criamos um único objeto e restauramos o estado de cada mundo nele
+        self._cpu_data = mujoco.MjData(model)
+
+    def _load_model_ids(self, model: MjModel):
+        """Carrega IDs de joints, actuators e site do modelo."""
+        _, _, self.panda_joint_qposadr, self.panda_joint_dofadr = \
+            get_model_robot_joints(model, self.robot_name)
+        _, self.panda_actuator_ids = get_model_actuators(model, self.robot_name)
+        self.ee_site_id = model.site(self.ee_site_name).id
+        self.n_arm_joints = len(self.panda_joint_dofadr)  # 6 para UR3
+
+    def reload_model_data(self, model: MjModel):
+        """Recarrega IDs após recriação do modelo (ex: mudança de obj type)."""
+        self._model = model
+        self._cpu_data = mujoco.MjData(model)
+        self._load_model_ids(model)
+
+    def update_desired_pose_batched(self,
+                                    ee_pos_batch: np.ndarray,
+                                    actions_batch: np.ndarray,
+                                    action_scaling_factor: float = 1.0) -> np.ndarray:
+        """Calcula posição desejada do EE para N mundos.
+
+        Args:
+            ee_pos_batch: [N, 3] — posição atual do EE para cada mundo
+            actions_batch: [N, 2] — ações do agente (delta x, delta y)
+            action_scaling_factor: fator de escala das ações
+
+        Returns:
+            ee_pos_d: [N, 3] — posição desejada do EE (com clipping)
+        """
+        N = ee_pos_batch.shape[0]
+        ee_pos_d = ee_pos_batch.copy()  # [N, 3]
+
+        # Incrementa x, y com ação escalada
+        ee_pos_d[:, 0] += actions_batch[:, 0] * action_scaling_factor
+        ee_pos_d[:, 1] += actions_batch[:, 1] * action_scaling_factor
+
+        # Força altura z fixa (altura de push)
+        ee_pos_d[:, 2] = self.initial_ee_zpos
+
+        # Clipping dos limites do workspace [N, 2]
+        ee_pos_d[:, :2] = np.clip(ee_pos_d[:, :2],
+                                   self.min_ee_xy_pos,
+                                   self.max_ee_xy_pos)
+        return ee_pos_d  # [N, 3]
+
+    def compute_ctrl_batched(self,
+                              qpos_batch: np.ndarray,
+                              site_xpos_batch: np.ndarray,
+                              site_xmat_batch: np.ndarray,
+                              ee_pos_d_batch: np.ndarray) -> np.ndarray:
+        """Calcula velocidades de junta para N mundos via IK Jacobiano.
+
+        Para cada mundo i:
+        - Restaura qpos no MjData CPU auxiliar
+        - Calcula Jacobiano via mujoco.mj_jacSite
+        - Resolve dq = pinv(J) @ error * Kp
+        - Aplica limites de velocidade e posição
+
+        Args:
+            qpos_batch:    [N, nq] — posições de junta de todos os mundos
+            site_xpos_batch: [N, nsite, 3] — posições dos sites
+            site_xmat_batch: [N, nsite, 9] — matrizes de rotação dos sites
+            ee_pos_d_batch: [N, 3] — posição desejada do EE
+
+        Returns:
+            ctrl_batch: [N, n_arm_joints] — velocidades de junta alvo
+        """
+        N = qpos_batch.shape[0]
+        ctrl_batch = np.zeros((N, self.n_arm_joints), dtype=np.float64)
+
+        # Buffers pré-alocados para Jacobianos (evita alocação a cada iteração)
+        nv = self._model.nv
+        jacp_full = np.zeros((3, nv))
+        jacr_full = np.zeros((3, nv))
+
+        cone_ref_vec_z = np.array([[0, 0, -1]])
+
+        for i in range(N):
+            # --- Restaura estado do mundo i no MjData CPU auxiliar ---
+            self._cpu_data.qpos[:] = qpos_batch[i]
+            self._cpu_data.qvel[:] = 0.0  # velocidades não necessárias para IK
+            mujoco.mj_kinematics(self._model, self._cpu_data)
+            mujoco.mj_comPos(self._model, self._cpu_data)
+
+            # --- Lê estado do EE para o mundo i ---
+            ee_pos_i = site_xpos_batch[i, self.ee_site_id, :]          # [3]
+            # site_xmat shape do MJWarp: [N, nsite, 3, 3] (já é matriz 3x3)
+            ee_rotmat_i = site_xmat_batch[i, self.ee_site_id, :, :]    # [3, 3]
+            ee_z_axis_i = ee_rotmat_i[:, 2]
+
+            # --- Calcula Jacobiano (translacional e rotacional) ---
+            jacp_full[:] = 0.0
+            jacr_full[:] = 0.0
+            mujoco.mj_jacSite(self._model, self._cpu_data,
+                               jacp_full, jacr_full, self.ee_site_id)
+
+            # Seleciona apenas as colunas dos joints do braço (6 GDL)
+            jacp_arm = jacp_full[:, self.panda_joint_dofadr]  # [3, 6]
+            jacr_arm = jacr_full[:, self.panda_joint_dofadr]  # [3, 6]
+
+            # --- Erro de tarefa: cone z + posição (4 DoF total) ---
+            conepos_error = np.zeros(4)
+            conepos_error[0] = float(cone_ref_vec_z @ ee_z_axis_i.reshape(-1, 1) - 1)
+            conepos_error[1:] = ee_pos_d_batch[i] - ee_pos_i
+
+            # --- Jacobiano da tarefa combinada [4, 6] ---
+            jac_conepos = np.zeros((4, 6))
+            jac_conepos[0, :] = (cone_ref_vec_z @
+                                  controller_utils.vec2SkewSymmetricMat(ee_z_axis_i) @
+                                  jacr_arm).flatten()
+            jac_conepos[1:, :] = jacp_arm
+
+            # --- Pseudoinversa + ganho proporcional ---
+            jac_pinv = controller_utils.pinv(jac_conepos, use_damping=self.use_sim_config)
+            dq_d = jac_pinv @ conepos_error
+            dq_d = dq_d * 10.0  # Kp
+
+            # --- Clipping de limites de velocidade e posição ---
+            q_i = qpos_batch[i][self.panda_joint_qposadr]
+            dq_d = self._clip_joint_limits(dq_d, q_i)
+
+            ctrl_batch[i] = dq_d
+
+        return ctrl_batch  # [N, 6]
+
+    def _clip_joint_limits(self, dq: np.ndarray, q: np.ndarray) -> np.ndarray:
+        """Aplica limites de velocidade considerando posição atual (sim config)."""
+        if self.use_sim_config:
+            dq = self.safety_dq_scale * np.clip(
+                dq,
+                a_min=np.maximum(self.dq_min, self.q_min - q),
+                a_max=np.minimum(self.dq_max, self.q_max - q)
+            )
+        else:
+            pos_aware_dq_min = np.maximum(self.dq_min, self.q_min - q)
+            pos_aware_dq_max = np.minimum(self.dq_max, self.q_max - q)
+            scales = np.maximum(dq / pos_aware_dq_min, dq / pos_aware_dq_max)
+            scales[~np.isfinite(scales)] = 1.0
+            dq = (self.safety_dq_scale * dq) / np.maximum(1.0, np.max(scales))
+        return dq

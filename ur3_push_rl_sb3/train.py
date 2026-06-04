@@ -7,7 +7,7 @@ from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import CallbackList, EvalCallback, StopTrainingOnMaxEpisodes
 from stable_baselines3.common.logger import configure
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv
-from ur3_push_rl_sb3.make_envs import make_vec_envs
+from ur3_push_rl_sb3.make_envs import make_vec_envs, make_warp_env
 from ur3_push_rl_sb3.utils import (parse_args, 
                                      get_run_name, 
                                      get_log_paths, 
@@ -119,17 +119,31 @@ def main():
         env_has_id = False
     
         # make envs
-        train_envs, eval_env = make_vec_envs(config.envStr, 
-                                            env_has_id,
-                                            log_path, 
-                                            vec_env_cls,
-                                            config.numTrain, 
-                                            config.trainSeed, 
-                                            config.evalSeed, 
-                                            rng_states_envs,
-                                            override_monitor_logs,
-                                            max_episode_steps=config.maxEpisodeSteps,
-                                            **env_kwargs)
+        if getattr(config, 'useWarp', 0):
+            # --- MuJoCo Warp: GPU batch (N mundos em paralelo) ---
+            print(f"[WarpVecEnv] Usando MuJoCo Warp com nworld={config.numTrain} mundos na GPU")
+            train_envs, eval_env = make_warp_env(
+                num_train=config.numTrain,
+                max_episode_steps=config.maxEpisodeSteps,
+                sparse_reward=bool(config.sparseReward),
+                ee_to_obj_reward_scale=config.eeToObjRewardScale,
+                action_scaling_factor=config.actionScalingFactor,
+                n_substeps=config.numSimSteps,
+                seed=config.trainSeed,
+            )
+        else:
+            # --- CPU: SubprocVecEnv (comportamento original) ---
+            train_envs, eval_env = make_vec_envs(config.envStr, 
+                                                env_has_id,
+                                                log_path, 
+                                                vec_env_cls,
+                                                config.numTrain, 
+                                                config.trainSeed, 
+                                                config.evalSeed, 
+                                                rng_states_envs,
+                                                override_monitor_logs,
+                                                max_episode_steps=config.maxEpisodeSteps,
+                                                **env_kwargs)
     
     
         if continue_train in ["", "r"]: # train new model
