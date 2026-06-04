@@ -145,7 +145,9 @@ def generate_model_xml_string(
             target_geom.set("conaffinity", "0")
             target_geom.set("rgba", "0 1 0 0.5") # Green semi-transparent
             target_geom.set("mass", "0")
-            target_geom.set("friction", "0 0 0")
+            # Fricção mínima exigida pelo MuJoCo Warp (MJ_MINMU=1e-5).
+            # friction="0 0 0" causa NaN na GPU após muitos steps.
+            target_geom.set("friction", "1e-5 0 0")
 
     # Update object
     object_body = worldbody.find("./body[@name='object']")
@@ -439,6 +441,14 @@ class MuJoCoUR3PushControllerBatched:
         cone_ref_vec_z = np.array([[0, 0, -1]])
 
         for i in range(N):
+            # --- Verifica NaN no estado do mundo i (physica instavel) ---
+            if (not np.all(np.isfinite(site_xpos_batch[i])) or
+                    not np.all(np.isfinite(site_xmat_batch[i])) or
+                    not np.all(np.isfinite(qpos_batch[i]))):
+                # Mundo com NaN: saida zero (robô parado) — evita crash no SVD
+                ctrl_batch[i] = 0.0
+                continue
+
             # --- Restaura estado do mundo i no MjData CPU auxiliar ---
             self._cpu_data.qpos[:] = qpos_batch[i]
             self._cpu_data.qvel[:] = 0.0  # velocidades não necessárias para IK
@@ -474,7 +484,12 @@ class MuJoCoUR3PushControllerBatched:
             jac_conepos[1:, :] = jacp_arm
 
             # --- Pseudoinversa + ganho proporcional ---
-            jac_pinv = controller_utils.pinv(jac_conepos, use_damping=self.use_sim_config)
+            try:
+                jac_pinv = controller_utils.pinv(jac_conepos, use_damping=self.use_sim_config)
+            except np.linalg.LinAlgError:
+                # SVD nao convergiu (Jacobiano singular ou contem NaN)
+                ctrl_batch[i] = 0.0
+                continue
             dq_d = jac_pinv @ conepos_error
             dq_d = dq_d * 10.0  # Kp
 
