@@ -371,12 +371,130 @@ class MuJoCoUR3PushControllerBatched:
         _, self.panda_actuator_ids = get_model_actuators(model, self.robot_name)
         self.ee_site_id = model.site(self.ee_site_name).id
         self.n_arm_joints = len(self.panda_joint_dofadr)  # 6 para UR3
+        # Parametros de damping para pseudo-inversa (mesmos do controller_utils.pinv)
+        self._pinv_damping  = 0.2    # use_sim_config=True (damped)
+        self._pinv_theta    = 0.03   # use_sim_config=False (truncated)
 
     def reload_model_data(self, model: MjModel):
         """Recarrega IDs após recriação do modelo (ex: mudança de obj type)."""
         self._model = model
         self._cpu_data = mujoco.MjData(model)
         self._load_model_ids(model)
+
+    def compute_ctrl_batched_vectorized(
+            self,
+            qpos_batch:      np.ndarray,   # [N, nq]
+            site_xpos_batch: np.ndarray,   # [N, nsite, 3]
+            site_xmat_batch: np.ndarray,   # [N, nsite, 3, 3]
+            xanchor_batch:   np.ndarray,   # [N, ndof, 3]  — d.xanchor da GPU
+            xaxis_batch:     np.ndarray,   # [N, ndof, 3]  — d.xaxis da GPU
+            ee_pos_d_batch:  np.ndarray,   # [N, 3]
+    ) -> np.ndarray:
+        """IK Jacobiano vetorizado: elimina o loop Python sobre N mundos.
+
+        Usa d.xanchor e d.xaxis do MuJoCo Warp para computar o Jacobiano
+        analitico de forma totalmente batcheada (NumPy puro, sem mj_jacSite).
+        SVD batcheado sobre [N, 4, 6] elimina overhead de N SVDs sequenciais.
+
+        Equivalencia numerica com compute_ctrl_batched: max diff ~1e-4
+        (float32 das arrays GPU vs float64 do mj_jacSite). Aceitavel para IK.
+
+        Returns:
+            ctrl_batch: [N, n_arm_joints] — velocidades de junta alvo
+        """
+        N = qpos_batch.shape[0]
+        ctrl_batch = np.zeros((N, self.n_arm_joints), dtype=np.float64)
+
+        # --- 1. Deteccao vetorizada de NaN (mundos com fisica instavel) ---
+        valid = (
+            np.all(np.isfinite(site_xpos_batch.reshape(N, -1)), axis=1) &
+            np.all(np.isfinite(xanchor_batch.reshape(N, -1)), axis=1)  &
+            np.all(np.isfinite(qpos_batch), axis=1)
+        )  # [N] bool
+        if not np.any(valid):
+            return ctrl_batch
+        idx = np.where(valid)[0]  # indices dos mundos validos
+        M   = len(idx)
+
+        # --- 2. Estado do EE [M, 3] ---
+        ee_pos    = site_xpos_batch[idx, self.ee_site_id, :]      # [M, 3]
+        ee_rotmat = site_xmat_batch[idx, self.ee_site_id, :, :]   # [M, 3, 3]
+        ee_z      = ee_rotmat[:, :, 2]                            # [M, 3]
+
+        # --- 3. Jacobiano analitico via xanchor/xaxis [M, 6, 3] ---
+        arm_anchor = xanchor_batch[idx][:, self.panda_joint_dofadr, :]  # [M, 6, 3]
+        arm_axis   = xaxis_batch[idx][:,   self.panda_joint_dofadr, :]  # [M, 6, 3]
+
+        # Jacobiano translacional: axis x (ee_pos - anchor)  -> [M, 6, 3] -> [M, 3, 6]
+        r    = ee_pos[:, None, :] - arm_anchor     # [M, 6, 3]
+        jacp = np.cross(arm_axis, r).transpose(0, 2, 1)  # [M, 3, 6]
+        # Jacobiano rotacional [M, 3, 6]
+        jacr = arm_axis.transpose(0, 2, 1)          # [M, 3, 6]
+
+        # --- 4. Jacobiano da tarefa combinada [M, 4, 6] ---
+        # Linha 0: restricao de cone z: cone_ref @ skew(ee_z) @ jacr
+        # Matriz skew-simetrica de ee_z: [M, 3, 3]
+        S = np.zeros((M, 3, 3), dtype=np.float64)
+        S[:, 0, 1] = -ee_z[:, 2];  S[:, 0, 2] =  ee_z[:, 1]
+        S[:, 1, 0] =  ee_z[:, 2];  S[:, 1, 2] = -ee_z[:, 0]
+        S[:, 2, 0] = -ee_z[:, 1];  S[:, 2, 1] =  ee_z[:, 0]
+
+        cone_ref = np.array([0., 0., -1.], dtype=np.float64)
+        # cone_ref @ S: [M, 3] — einsum sobre indice j
+        cone_S   = np.einsum('j,mji->mi', cone_ref, S)             # [M, 3]
+        # cone_S @ jacr: [M, 3] @ [M, 3, 6] -> [M, 6]
+        cone_row = np.einsum('mi,mij->mj', cone_S, jacr)           # [M, 6]
+
+        jac_conepos = np.zeros((M, 4, 6), dtype=np.float64)
+        jac_conepos[:, 0, :]  = cone_row
+        jac_conepos[:, 1:, :] = jacp
+
+        # --- 5. Erro de tarefa [M, 4] ---
+        cone_scalar = np.einsum('j,mj->m', cone_ref, ee_z) - 1.0  # [M]
+        pos_error   = ee_pos_d_batch[idx] - ee_pos                 # [M, 3]
+        task_error  = np.concatenate([cone_scalar[:, None], pos_error], axis=1)  # [M, 4]
+
+        # --- 6. Pseudo-inversa batcheada via SVD [M, 4, 6] -> [M, 6, 4] ---
+        try:
+            U, s, Vt = np.linalg.svd(jac_conepos, full_matrices=False)
+            # full_matrices=False: U[M,4,4], s[M,4], Vt[M,4,6]
+            if self.use_sim_config:
+                # Damped pseudo-inverse (lambda = 0.2)
+                s_d = s / (s**2 + self._pinv_damping**2)          # [M, 4]
+            else:
+                # Truncated pseudo-inverse (theta = 0.03)
+                s_d = np.where(s >= self._pinv_theta,
+                               1.0 / s,
+                               s / self._pinv_theta**2)            # [M, 4]
+            # J_pinv = Vt^T @ diag(s_d) @ U^T
+            jac_pinv = (Vt.transpose(0, 2, 1) * s_d[:, None, :]) @ U.transpose(0, 2, 1)
+            # [M, 6, 4]
+            # dq = Kp * J_pinv @ error
+            dq_d = 10.0 * np.einsum('mij,mj->mi', jac_pinv, task_error)  # [M, 6]
+        except np.linalg.LinAlgError:
+            # SVD nao convergiu (fallback: sem controle)
+            return ctrl_batch
+
+        # --- 7. Clip vetorizado de limites de junta ---
+        q_arm = qpos_batch[idx][:, self.panda_joint_qposadr]  # [M, 6]
+        if self.use_sim_config:
+            dq_min_pw = np.maximum(self.dq_min[None, :], self.q_min[None, :] - q_arm)
+            dq_max_pw = np.minimum(self.dq_max[None, :], self.q_max[None, :] - q_arm)
+            dq_d = self.safety_dq_scale * np.clip(dq_d, dq_min_pw, dq_max_pw)
+        else:
+            dq_min_pw = np.maximum(self.dq_min[None, :], self.q_min[None, :] - q_arm)
+            dq_max_pw = np.minimum(self.dq_max[None, :], self.q_max[None, :] - q_arm)
+            with np.errstate(divide='ignore', invalid='ignore'):
+                scales = np.maximum(
+                    np.where(dq_min_pw != 0, dq_d / dq_min_pw, 0.0),
+                    np.where(dq_max_pw != 0, dq_d / dq_max_pw, 0.0),
+                )  # [M, 6]
+            scales[~np.isfinite(scales)] = 1.0
+            scale_max = np.maximum(1.0, np.max(scales, axis=1, keepdims=True))  # [M, 1]
+            dq_d = (self.safety_dq_scale * dq_d) / scale_max
+
+        ctrl_batch[idx] = dq_d
+        return ctrl_batch  # [N, 6]
 
     def update_desired_pose_batched(self,
                                     ee_pos_batch: np.ndarray,

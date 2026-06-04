@@ -267,15 +267,17 @@ class MuJoCoUR3PushSimpleWarpEnv:
         site_xpos = self._d_gpu.site_xpos.numpy()  # [N, nsites, 3]
         site_xmat = self._d_gpu.site_xmat.numpy()  # [N, nsites, 3, 3]
         qpos      = self._d_gpu.qpos.numpy()        # [N, nq]
+        xanchor   = self._d_gpu.xanchor.numpy()     # [N, ndof, 3]
+        xaxis     = self._d_gpu.xaxis.numpy()       # [N, ndof, 3]
 
-        # 2. CPU: IK vetorizado → ctrl_batch [N, 6]
+        # 2. CPU: IK vetorizado (batcheado, sem loop Python) → ctrl_batch [N, 6]
         scaled_actions = actions * self.action_scaling_factor
         ee_pos_batch = site_xpos[:, self._ee_site_id, :]  # [N, 3]
         ee_pos_d = self.controller.update_desired_pose_batched(
             ee_pos_batch, scaled_actions
         )
-        ctrl_batch = self.controller.compute_ctrl_batched(
-            qpos, site_xpos, site_xmat, ee_pos_d
+        ctrl_batch = self.controller.compute_ctrl_batched_vectorized(
+            qpos, site_xpos, site_xmat, xanchor, xaxis, ee_pos_d
         )
 
         # 3. CPU→GPU: aplica ctrl (apenas joints do braço)
