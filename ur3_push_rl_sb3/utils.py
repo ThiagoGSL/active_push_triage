@@ -1,4 +1,4 @@
-import argparse, sys, os
+import argparse, sys, os, datetime
 import cv2 as cv
 import tensorboard, ray, mujoco
 from stable_baselines3.common.utils import get_system_info
@@ -17,6 +17,10 @@ def parse_args():
     train_eval_group.add_argument("--useFingertipSensor", type=int, choices=[0, 1], default=0, help="use fingertip sensor data? (only used if ee='fingertip')")
     train_eval_group.add_argument("--useSimConfig", type=int, choices=[0, 1], default=1, help="use sim or real controller + camera config? (real controller config fixes some problems with the real robot controller")
     train_eval_group.add_argument("--useWarp", type=int, choices=[0, 1], default=0, help="use MuJoCo Warp GPU-batched training? (1=WarpVecEnv, 0=SubprocVecEnv CPU). numTrain becomes nworld (N parallel GPU worlds). Requires NVIDIA GPU.")
+    train_eval_group.add_argument("--resumePath", type=str, default=None,
+                                  help="Path to an existing run's save_path (e.g. '.../rl/MujocoUR3PushSimpleEnv_20260608_154450') "
+                                       "to resume training from its latest checkpoint. When set, --commentLogPath and all other "
+                                       "arguments are still parsed but the folder name is taken from resumePath, not generated.")
 
     train_eval_config, _ = train_eval_parser.parse_known_args()
 
@@ -28,6 +32,9 @@ def parse_args():
     gym_env_group.add_argument("--sparseReward", type=int, choices=[0, 1], default=0, help="use sparse reward? (0: dense ground-truth recommended for PPO)")
     gym_env_group.add_argument("--groundTruthDenseReward", type=int, choices=[0,1], default=1, help="use ground truth dense reward -dist(obj,target)? (recommended for PPO without HER)")
     gym_env_group.add_argument("--eeToObjRewardScale", type=float, default=0.2, help="reward shaping: scale for EE\u2192object distance penalty added to the push reward (0=disabled); guides the approach phase so PPO learns to touch the object before pushing")
+    gym_env_group.add_argument("--torquePenaltyScale", type=float, default=0.001, help="reward shaping: scale for joint torque penalty (norm of qfrc_actuator[:6] / 6); penalises excessive joint effort to encourage smooth motions (0=disabled, only used by SimpleEnv)")
+    gym_env_group.add_argument("--manipulabilityRewardScale", type=float, default=0.0, help="reward shaping: scale for manipulability bonus per step; rewards configurations far from kinematic singularities (0=disabled, only used by SimpleEnv)")
+    gym_env_group.add_argument("--manipulabilityMetric", type=str, choices=["yoshikawa", "min_sv"], default="yoshikawa", help="metric for the manipulability bonus: 'yoshikawa'=sqrt(det(J J^T)), 'min_sv'=smallest singular value of J (only used by SimpleEnv when manipulabilityRewardScale>0)")
     gym_env_group.add_argument("--considerObjectOrientation", type=int, choices=[0, 1], default=0, help="consider object orientation in reward function?")
     gym_env_group.add_argument("--actionScalingFactor", type=float, default=0.05, help="x,y actions are multiplied by this factor (not used in case of action scaling env)")
     gym_env_group.add_argument("--numSimSteps", type=int, default=120, help="number of simulation steps that are executed if gym.step() is called (-1: RL agent learns number of sim steps)")
@@ -89,6 +96,10 @@ def parse_args():
     # evaluation config (best model)
     ############################################
     eval_group = config_parser.add_argument_group("Best model evaluation", "params best model evaluation (not used for training)")
+    eval_group.add_argument("--evalPath", type=str, default=None,
+                            help="Path to an existing run's root folder (e.g. '.../rl/MujocoUR3PushSimpleEnv_warp_..._20260608_...') "
+                                 "to load the best model from its 'evaluation/' subfolder. "
+                                 "When set, --logDir and run-name arguments are ignored for model loading.")
     eval_group.add_argument("--eEnvStr", type=str, default="MujocoUR3PushEnv", help="Gymnasium env id (str) used t evaluate the best model")
     eval_group.add_argument("--eUseSimConfig", type=int, choices=[0, 1], default=1, help="use sim or real controller + camera config? (real controller config fixes some problems with the real robot controller")
     eval_group.add_argument("--eConsiderObjectOrientation", type=int, choices=[0, 1], default=0, help="consider object orientation in reward function?")
@@ -128,41 +139,21 @@ def parse_args():
     return config, cmd_args, config_parser
 
 def get_run_name(config, cmd_args, config_parser):
+    """Generate a short, unique run name: {EnvStr}[_{comment}]_{YYYYMMDD_HHMMSS}.
+
+    All hyperparameters are stored in config.txt inside the logs/ folder,
+    so the folder name only needs to be human-readable and unique.
+    Use --commentLogPath to add a semantic label (e.g. 'warp_v4', 'noEEReward').
+    """
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     config_tmp = deepcopy(config)
-    # append params != default to suffix
-    suffix_log_path = ""
-    exclude = [ "numTrain", "ee", "envStr", "launchArgs", "maxTrainEpisodes", \
-                "logDir", "commentLogPath", "eEnvStr", "eUseSimConfig", "eConsiderObjectOrientation", "eDeterministicEvalPolicy", "eNumEvalEpisodes", "eActionScalingFactor", \
-                "eNumSimSteps", "eSafetyDQScale", "eObjType", "eObjMass", "eObjSlidingFriction", "eObjTorsionalFriction", "eObjSize0", \
-                "eObjSize1", "eObjSize2", "eFixedObjectHeightVAE", "eThresholdPos", "eThresholdzAngle", "eThresholdLatentSpace", \
-                "eEvalSeed", "eSampleMassFricFromUniformDist", "eScaleExponential", "eObjRangeRadius", "eObjRangeWidthLength", "eObjRangeMass", \
-                "eObjRangeSlidingFriction", "eObjRangeTorsionalFriction", "eVerbose", "ePlotName", "eVideoName", "eStepDelay", "eStepByStep"]
 
-    arg_name_idx = [i for i in range(0, len(cmd_args)) if cmd_args[i].startswith("--")]
-    arg_name_idx.reverse()
-    for i in arg_name_idx:
-        arg_name = cmd_args[i][2:]
-        if arg_name not in exclude:
-            default = str(config_parser.get_default(arg_name))
-            val = ','.join(cmd_args[i+1:])
-
-            if default.startswith("["): 
-                default = default[1:-1].replace(" ","")
-
-            if default != val:
-                suffix_log_path = f"_{arg_name}_{val}" + suffix_log_path
-        cmd_args = cmd_args[0:i]
-
-    # add comment
+    comment = ""
     if config_tmp.commentLogPath != "":
-        if not config_tmp.commentLogPath.startswith("_"):
-            comment = "_" + config_tmp.commentLogPath
-        else:
-            comment = config_tmp.commentLogPath
-        suffix_log_path += comment
+        c = config_tmp.commentLogPath
+        comment = f"_{c}" if not c.startswith("_") else c
 
-    run_name = f"{config_tmp.envStr}{suffix_log_path}"
-
+    run_name = f"{config_tmp.envStr}{comment}_{timestamp}"
     return run_name
 
 def get_log_paths(logDir, run_name, eval_dir_name = "evaluation", log_dir_name = "logs", cp_dir_name = "checkpoint"):

@@ -26,45 +26,80 @@ def main():
     eval_dir_name = "evaluation"
     log_dir_name = "logs"
     cp_dir_name = "checkpoint"
-    save_path, eval_path, log_path, cp_path = get_log_paths(config.logDir, 
-                                                            get_run_name(config, cmd_args, config_parser),
-                                                            eval_dir_name,
-                                                            log_dir_name,
-                                                            cp_dir_name)
-    
-    # continue training?
-    continue_train = ""
-    reset_num_timesteps = True # new training curves in tensorboard
-    rng_states_envs = None # set train/test seed instead if loading RNG states
-    override_monitor_logs = True # append logs to existing monitor log files?
-    if os.path.exists(log_path):
-        print(f"\nlog path already exists. Current log path is: {save_path}")
-        while continue_train not in ["y", "n", "r"]:
-            continue_train = input("Continue training (y), Restart and overwrite (r), or Cancel (n)? ")
-    
-        if continue_train == "n":
-            print("No files have been changed.")
-            sys.exit()
-        elif continue_train == "r":
-            print(f"Overwriting existing log path: {save_path}")
-            shutil.rmtree(save_path)
-            os.makedirs(save_path, exist_ok=True)
-        elif not os.path.exists(cp_path):
-            # continue_train == "y", but no checkpoint exists
-            print("Cannot continue training: log path exists, but no checkpoint found\n")
-            sys.exit()
-        else:
-            # continue_train == "y" and checkpoint exists
-            reset_num_timesteps = False # continue training curves in tensorboard
-            override_monitor_logs = False
-            # reset log and evaluation files 
-            shutil.rmtree(path=log_path)
-            shutil.rmtree(path=eval_path)
-            shutil.copytree(src=os.path.join(cp_path, log_dir_name), dst=log_path)
-            shutil.copytree(src=os.path.join(cp_path, eval_dir_name), dst=eval_path)
-            # load RNG states
-            with open(os.path.join(cp_path,"rng_states_gymenvs.pkl"), mode="rb") as rng_env_file:
-                rng_states_envs = pickle.load(rng_env_file)
+
+    if config.resumePath is not None:
+        # ── Resume mode ──────────────────────────────────────────────────────
+        # Derive all paths from the existing run directory supplied by the user.
+        save_path = os.path.normpath(config.resumePath)
+        eval_path = os.path.join(save_path, eval_dir_name)
+        log_path  = os.path.join(save_path, log_dir_name)
+        cp_path   = os.path.join(save_path, cp_dir_name)
+
+        if not os.path.isdir(save_path):
+            print(f"[ERROR] --resumePath directory does not exist: {save_path}")
+            sys.exit(1)
+        if not os.path.isdir(cp_path):
+            print(f"[ERROR] No checkpoint found inside: {cp_path}\n"
+                  f"        Start a new run first so that a checkpoint is created.")
+            sys.exit(1)
+
+        print(f"\n[Resume] Continuing training from: {save_path}")
+        continue_train = "y"
+        reset_num_timesteps = False
+        override_monitor_logs = False
+
+        # Restore logs/evaluation from the checkpoint snapshot
+        shutil.rmtree(path=log_path, ignore_errors=True)
+        shutil.rmtree(path=eval_path, ignore_errors=True)
+        shutil.copytree(src=os.path.join(cp_path, log_dir_name), dst=log_path)
+        shutil.copytree(src=os.path.join(cp_path, eval_dir_name), dst=eval_path)
+
+        # Load RNG states saved at checkpoint
+        with open(os.path.join(cp_path, "rng_states_gymenvs.pkl"), mode="rb") as rng_env_file:
+            rng_states_envs = pickle.load(rng_env_file)
+
+    else:
+        # ── New run mode ──────────────────────────────────────────────────────
+        save_path, eval_path, log_path, cp_path = get_log_paths(
+            config.logDir,
+            get_run_name(config, cmd_args, config_parser),
+            eval_dir_name,
+            log_dir_name,
+            cp_dir_name,
+        )
+
+        continue_train = ""
+        reset_num_timesteps = True
+        rng_states_envs = None
+        override_monitor_logs = True
+
+        # A timestamp-based name is always unique, so log_path should never exist.
+        # Guard kept for safety (e.g. two processes started within the same second).
+        if os.path.exists(log_path):
+            print(f"\n[WARNING] log path already exists: {save_path}")
+            while continue_train not in ["y", "n", "r"]:
+                continue_train = input("Continue training (y), Restart and overwrite (r), or Cancel (n)? ")
+
+            if continue_train == "n":
+                print("No files have been changed.")
+                sys.exit()
+            elif continue_train == "r":
+                print(f"Overwriting existing log path: {save_path}")
+                shutil.rmtree(save_path)
+                os.makedirs(save_path, exist_ok=True)
+            elif not os.path.exists(cp_path):
+                print("Cannot continue training: log path exists, but no checkpoint found\n")
+                sys.exit()
+            else:
+                reset_num_timesteps = False
+                override_monitor_logs = False
+                shutil.rmtree(path=log_path)
+                shutil.rmtree(path=eval_path)
+                shutil.copytree(src=os.path.join(cp_path, log_dir_name), dst=log_path)
+                shutil.copytree(src=os.path.join(cp_path, eval_dir_name), dst=eval_path)
+                with open(os.path.join(cp_path, "rng_states_gymenvs.pkl"), mode="rb") as rng_env_file:
+                    rng_states_envs = pickle.load(rng_env_file)
+
     
     try:
         # object reset options
@@ -109,7 +144,10 @@ def main():
         else:
             # SimpleEnv-specific params
             env_kwargs.update({
-                "ee_to_obj_reward_scale": config.eeToObjRewardScale
+                "ee_to_obj_reward_scale":      config.eeToObjRewardScale,
+                "torque_penalty_scale":        config.torquePenaltyScale,
+                "manipulability_reward_scale": config.manipulabilityRewardScale,
+                "manipulability_metric":       config.manipulabilityMetric,
             })
     
         env_kwargs.update({"render_mode": "rgb_array",
@@ -130,6 +168,9 @@ def main():
                 action_scaling_factor=config.actionScalingFactor,
                 n_substeps=config.numSimSteps,
                 seed=config.trainSeed,
+                torque_penalty_scale=config.torquePenaltyScale,
+                manipulability_reward_scale=config.manipulabilityRewardScale,
+                manipulability_metric=config.manipulabilityMetric,
             )
         else:
             # --- CPU: SubprocVecEnv (comportamento original) ---

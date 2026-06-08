@@ -78,7 +78,10 @@ class MuJoCoUR3PushSimpleWarpEnv:
                  sparse_reward: bool = True,
                  ee_to_obj_reward_scale: float = 0.2,
                  action_scaling_factor: float = 0.6,
-                 seed: int = 0):
+                 seed: int = 0,
+                 torque_penalty_scale: float = 0.001,
+                 manipulability_reward_scale: float = 0.0,
+                 manipulability_metric: str = "yoshikawa"):
 
         self.nworld = nworld
         self.n_substeps = n_substeps
@@ -86,6 +89,16 @@ class MuJoCoUR3PushSimpleWarpEnv:
         self.ee_to_obj_reward_scale = ee_to_obj_reward_scale
         self.action_scaling_factor = action_scaling_factor
         self.rng = np.random.default_rng(seed)
+        # Torque penalty: penalises excessive joint effort (0 = disabled).
+        # Applied every step over all N worlds using qfrc_actuator from GPU.
+        self.torque_penalty_scale = torque_penalty_scale
+        # Manipulability bonus: rewards configs far from kinematic singularities.
+        # Jacobian is built analytically from xanchor/xaxis (already on CPU) — no extra GPU sync.
+        # metric: 'yoshikawa' = sqrt(det(J J^T)), 'min_sv' = smallest singular value of J.
+        assert manipulability_metric in ("yoshikawa", "min_sv"), \
+            f"manipulability_metric must be 'yoshikawa' or 'min_sv', got '{manipulability_metric}'"
+        self.manipulability_reward_scale = manipulability_reward_scale
+        self.manipulability_metric = manipulability_metric
 
         # --- Carrega modelo CPU (UMA VEZ) ---
         xml = mujoco_utils.generate_model_xml_string(
@@ -297,9 +310,20 @@ class MuJoCoUR3PushSimpleWarpEnv:
         # 5. Incrementa contagem de steps
         self._elapsed_steps += 1
 
-        # 6. Obs, reward, done
+        # 6. Leitura pós-step para reward shaping (torque)
+        # qfrc_actuatoré lido APÓS o step para refletir as forças reais aplicadas.
+        # É um array pequeno [N, ndof] — overhead de sync mínimo.
+        qfrc_post = self._d_gpu.qfrc_actuator.numpy() if self.torque_penalty_scale > 0 else None  # [N, ndof]
+
+        # 7. Obs, reward, done
         obs = self._get_obs_batch()
-        rewards = self._compute_rewards(obs["achieved_goal"], obs["desired_goal"], site_xpos)
+        rewards = self._compute_rewards(
+            obs["achieved_goal"], obs["desired_goal"],
+            site_xpos_pre=site_xpos,
+            xanchor=xanchor,
+            xaxis=xaxis,
+            qfrc_post=qfrc_post,
+        )
         terminateds = self._compute_terminated(obs["achieved_goal"], obs["desired_goal"])
         truncateds = np.zeros(self.nworld, dtype=bool)
         infos = [{"is_success": bool(terminateds[i])} for i in range(self.nworld)]
@@ -348,13 +372,19 @@ class MuJoCoUR3PushSimpleWarpEnv:
     def _compute_rewards(self,
                           achieved_goal: np.ndarray,
                           desired_goal: np.ndarray,
-                          site_xpos_pre: np.ndarray) -> np.ndarray:
+                          site_xpos_pre: np.ndarray,
+                          xanchor: np.ndarray = None,
+                          xaxis: np.ndarray = None,
+                          qfrc_post: np.ndarray = None) -> np.ndarray:
         """Calcula recompensas para N mundos.
 
         Args:
-            achieved_goal: [N, 2] — posição xy do objeto
-            desired_goal:  [N, 2] — posição xy do target
-            site_xpos_pre: [N, nsites, 3] — posição dos sites (pré-step, para EE)
+            achieved_goal:  [N, 2] — posição xy do objeto
+            desired_goal:   [N, 2] — posição xy do target
+            site_xpos_pre:  [N, nsites, 3] — posição dos sites (pré-step, para EE)
+            xanchor:        [N, ndof, 3] — âncora de cada joint (pré-step)
+            xaxis:          [N, ndof, 3] — eixo de cada joint (pré-step)
+            qfrc_post:      [N, ndof] — força dos atuadores pós-step (ou None)
 
         Returns:
             rewards: [N] — float
@@ -366,10 +396,51 @@ class MuJoCoUR3PushSimpleWarpEnv:
         else:
             rewards = -dist_obj_tgt.astype(np.float32)
 
+            # EE→object approach reward
             if self.ee_to_obj_reward_scale > 0:
                 ee_xy = site_xpos_pre[:, self._ee_site_id, :2]  # [N, 2]
                 dist_ee_obj = np.linalg.norm(achieved_goal - ee_xy, axis=1)  # [N]
                 rewards -= self.ee_to_obj_reward_scale * dist_ee_obj
+
+        # ------------------------------------------------------------------
+        # Torque penalty: penalises excessive joint effort.
+        # qfrc_post is read from GPU after the physics step — one small sync.
+        # ------------------------------------------------------------------
+        if self.torque_penalty_scale > 0 and qfrc_post is not None:
+            # qfrc_post[:, :6]: forces on the 6 UR3 joints (first 6 DOFs)
+            torque_norm = np.linalg.norm(qfrc_post[:, :6], axis=1) / 6.0  # [N]
+            rewards -= self.torque_penalty_scale * torque_norm
+
+        # ------------------------------------------------------------------
+        # Manipulability bonus: rewards configs far from singularities.
+        # Geometric Jacobian built from xanchor/xaxis (already on CPU — zero extra sync).
+        #
+        # For a revolute joint chain, the translational column i of J is:
+        #   J_i = axis_i × (p_ee - anchor_i)
+        # ------------------------------------------------------------------
+        if self.manipulability_reward_scale > 0 and xanchor is not None:
+            ee_pos = site_xpos_pre[:, self._ee_site_id, :]  # [N, 3]
+            axes   = xaxis[:, :6, :]                        # [N, 6, 3]
+            anch   = xanchor[:, :6, :]                      # [N, 6, 3]
+
+            # r[n, j] = vector from joint j anchor to EE for world n
+            r = ee_pos[:, np.newaxis, :] - anch             # [N, 6, 3]
+
+            # Translational Jacobian columns: J_col = axis × r  → [N, 6, 3]
+            J_cols = np.cross(axes, r)                      # [N, 6, 3]
+            J = J_cols.transpose(0, 2, 1)                   # [N, 3, 6]
+
+            if self.manipulability_metric == "yoshikawa":
+                # w = sqrt(det(J J^T))  — volume of velocity ellipsoid; 0 at singularities
+                JJT = J @ J.transpose(0, 2, 1)              # [N, 3, 3]
+                dets = np.linalg.det(JJT)                   # [N]
+                w = np.sqrt(np.maximum(0.0, dets))          # [N]
+            else:  # "min_sv"
+                # Smallest singular value of J — most direct proximity measure
+                sv = np.linalg.svd(J, compute_uv=False)     # [N, 3] (sorted descending)
+                w = sv[:, -1]                               # [N] — smallest singular value
+
+            rewards += self.manipulability_reward_scale * w
 
         return rewards
 

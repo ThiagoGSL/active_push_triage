@@ -1,27 +1,68 @@
-import os
+import os, sys
 import numpy as np
 import gymnasium as gym
+
+# --- MONKEY PATCH MUJOCO RENDERING ---
+# Handles compatibility issue between gymnasium and newer mujoco versions (solver_iter vs solver_niter)
+try:
+    import gymnasium.envs.mujoco.mujoco_rendering as mujoco_rendering
+    for viewer_class_name in ['WindowViewer', 'OffScreenViewer']:
+        if hasattr(mujoco_rendering, viewer_class_name):
+            viewer_class = getattr(mujoco_rendering, viewer_class_name)
+            if hasattr(viewer_class, '_create_overlay'):
+                original_create_overlay = viewer_class._create_overlay
+                def make_safe_overlay(orig):
+                    def safe_create_overlay(self):
+                        try:
+                            orig(self)
+                        except AttributeError:
+                            pass
+                    return safe_create_overlay
+                viewer_class._create_overlay = make_safe_overlay(original_create_overlay)
+except ImportError:
+    pass
+# -------------------------------------
+
 from ur3_push_rl_sb3.utils import parse_args, get_run_name, get_log_paths
 from stable_baselines3.common.vec_env import VecVideoRecorder
 from stable_baselines3 import PPO
 import logging
 import time
 
-# input args that determine dir name of best model
 config, cmd_args, config_parser = parse_args()
-run_name = get_run_name(config, cmd_args, config_parser)
 
-# log paths
-# plots
-plot_path = os.path.join(config.logDir, "plots")
+# ── Resolve eval_path ────────────────────────────────────────────────────────
+# Option A: --evalPath points directly to the run's root folder.
+#           eval_path = <evalPath>/evaluation/   (contains best_model.zip)
+# Option B: legacy behaviour — derive run_name via get_run_name + get_log_paths.
+# ─────────────────────────────────────────────────────────────────────────────
+if config.evalPath is not None:
+    eval_dir_name = "evaluation"
+    eval_path = os.path.join(os.path.normpath(config.evalPath), eval_dir_name)
+    if not os.path.isdir(eval_path):
+        print(f"[ERROR] evaluation folder not found: {eval_path}")
+        print(f"        Make sure --evalPath points to the run root (not to 'evaluation/' itself).")
+        sys.exit(1)
+    if not os.path.isfile(os.path.join(eval_path, "best_model.zip")):
+        print(f"[ERROR] best_model.zip not found in: {eval_path}")
+        print(f"        Training may not have completed its first evaluation yet.")
+        sys.exit(1)
+else:
+    # Legacy: reconstruct path from run_name (works for old timestamp-less runs)
+    run_name = get_run_name(config, cmd_args, config_parser)
+    _, eval_path, _, _ = get_log_paths(config.logDir, run_name)
+
+# plots / videos — base dir: logDir se disponível, senão parent do evalPath
+_base_dir = config.logDir if config.logDir else os.path.dirname(os.path.dirname(eval_path))
+plot_path = os.path.join(_base_dir, "plots")
 if len(config.ePlotName) > 0:
     os.makedirs(plot_path, exist_ok=True)
 # videos
-video_path = os.path.join(config.logDir, "videos")
-if len(config.eVideoName) > 0 and not "Ros" in config.eEnvStr:
+video_path = os.path.join(_base_dir, "videos")
+if len(config.eVideoName) > 0 and "Ros" not in config.eEnvStr:
     os.makedirs(video_path, exist_ok=True)
-# best model
-_, eval_path, _, _ = get_log_paths(config.logDir, run_name)
+
+
 
 # environment
 # object params

@@ -138,4 +138,4 @@ image_*.png
 
 # Dados de treinamento RL (modelos, logs, tensorboard) — nao versionar
 ur3_push_data/rl/
-C:/TCC/
+
