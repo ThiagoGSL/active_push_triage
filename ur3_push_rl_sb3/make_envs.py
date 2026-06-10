@@ -13,7 +13,11 @@ def make_warp_env(num_train: int,
                   seed: int = 0,
                   torque_penalty_scale: float = 0.001,
                   manipulability_reward_scale: float = 0.0,
-                  manipulability_metric: str = "yoshikawa"):
+                  manipulability_metric: str = "yoshikawa",
+                  action_rate_penalty_scale: float = 0.0,
+                  success_bonus: float = 0.0,
+                  early_termination_on_success: bool = False,
+                  randomize_initial_joints: bool = False):
     """Cria WarpVecEnv (MuJoCo Warp, GPU batch) compatível com SB3.
 
     Substitui make_vec_envs() quando --useWarp=1 é passado.
@@ -46,6 +50,10 @@ def make_warp_env(num_train: int,
         torque_penalty_scale=torque_penalty_scale,
         manipulability_reward_scale=manipulability_reward_scale,
         manipulability_metric=manipulability_metric,
+        action_rate_penalty_scale=action_rate_penalty_scale,
+        success_bonus=success_bonus,
+        early_termination_on_success=early_termination_on_success,
+        randomize_initial_joints=randomize_initial_joints,
     )
 
     # Ambiente de treinamento: num_train mundos

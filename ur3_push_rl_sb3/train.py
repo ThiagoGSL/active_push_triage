@@ -148,6 +148,10 @@ def main():
                 "torque_penalty_scale":        config.torquePenaltyScale,
                 "manipulability_reward_scale": config.manipulabilityRewardScale,
                 "manipulability_metric":       config.manipulabilityMetric,
+                "action_rate_penalty_scale":   config.actionRatePenaltyScale,
+                "success_bonus":               config.successBonus,
+                "early_termination_on_success": bool(config.earlyTerminationOnSuccess),
+                "randomize_initial_joints":    bool(config.randomizeInitialJoints),
             })
     
         env_kwargs.update({"render_mode": "rgb_array",
@@ -171,7 +175,17 @@ def main():
                 torque_penalty_scale=config.torquePenaltyScale,
                 manipulability_reward_scale=config.manipulabilityRewardScale,
                 manipulability_metric=config.manipulabilityMetric,
+                action_rate_penalty_scale=config.actionRatePenaltyScale,
+                success_bonus=config.successBonus,
+                early_termination_on_success=bool(config.earlyTerminationOnSuccess),
+                randomize_initial_joints=bool(config.randomizeInitialJoints),
             )
+            
+            if config.numStackedObs is not None:
+                from stable_baselines3.common.vec_env import VecFrameStack
+                print(f"[WarpVecEnv] Aplicando Frame Stacking (n={config.numStackedObs})")
+                train_envs = VecFrameStack(train_envs, n_stack=config.numStackedObs)
+                eval_env = VecFrameStack(eval_env, n_stack=config.numStackedObs)
         else:
             # --- CPU: SubprocVecEnv (comportamento original) ---
             train_envs, eval_env = make_vec_envs(config.envStr, 

@@ -51,9 +51,9 @@ _MAX_EE_XY = np.array([0.65, 0.25])
 _INITIAL_EE_ZPOS = 0.045
 _HEIGHT_TABLE = 0.02
 
-# Spawn range relativo ao EE inicial (mesmo que MuJoCoUR3PushSimpleEnv)
-_RANGE_X_POS = np.array([0.07, 0.27])
-_RANGE_Y_POS = np.array([-0.12, 0.12])
+# Spawn range absoluto no workspace (X e Y na mesa)
+_RANGE_X_POS = np.array([0.25, 0.50])
+_RANGE_Y_POS = np.array([-0.20, 0.20])
 _THRESHOLD_POS = 0.05
 
 
@@ -81,7 +81,11 @@ class MuJoCoUR3PushSimpleWarpEnv:
                  seed: int = 0,
                  torque_penalty_scale: float = 0.001,
                  manipulability_reward_scale: float = 0.0,
-                 manipulability_metric: str = "yoshikawa"):
+                 manipulability_metric: str = "yoshikawa",
+                 action_rate_penalty_scale: float = 0.0,
+                 success_bonus: float = 0.0,
+                 early_termination_on_success: bool = False,
+                 randomize_initial_joints: bool = False):
 
         self.nworld = nworld
         self.n_substeps = n_substeps
@@ -99,6 +103,13 @@ class MuJoCoUR3PushSimpleWarpEnv:
             f"manipulability_metric must be 'yoshikawa' or 'min_sv', got '{manipulability_metric}'"
         self.manipulability_reward_scale = manipulability_reward_scale
         self.manipulability_metric = manipulability_metric
+        self.action_rate_penalty_scale = action_rate_penalty_scale
+        self.success_bonus = success_bonus
+        self.early_termination_on_success = early_termination_on_success
+        self.randomize_initial_joints = randomize_initial_joints
+        
+        # Action history for the batch
+        self.previous_action = np.zeros((nworld, 2), dtype=np.float32)
 
         # --- Carrega modelo CPU (UMA VEZ) ---
         xml = mujoco_utils.generate_model_xml_string(
@@ -209,6 +220,11 @@ class MuJoCoUR3PushSimpleWarpEnv:
         for i in world_ids:
             # Reseta joints do robô
             qpos_all[i] = self._initial_robot_qpos.copy()
+            if self.randomize_initial_joints:
+                noise = self.rng.uniform(-0.05, 0.05, size=6)
+                qpos_all[i, :6] += noise
+                
+            self.previous_action[i] = 0.0
 
             # Amostra pose do objeto
             obj_xy = self._sample_xy_away_from(self.initial_ee_xypos, min_dist=0.1)
@@ -248,14 +264,16 @@ class MuJoCoUR3PushSimpleWarpEnv:
         return self._get_obs_batch()
 
     def _sample_xy_away_from(self, ref_xy: np.ndarray, min_dist: float) -> np.ndarray:
-        """Amostra posição xy suficientemente distante de ref_xy."""
+        """Amostra posição xy absoluta na mesa, suficientemente distante de ref_xy."""
         for _ in range(100):
-            x = self.initial_ee_xypos[0] + self.rng.uniform(*_RANGE_X_POS)
-            y = self.initial_ee_xypos[1] + self.rng.uniform(*_RANGE_Y_POS)
+            x = self.rng.uniform(*_RANGE_X_POS)
+            y = self.rng.uniform(*_RANGE_Y_POS)
             if np.linalg.norm(np.array([x, y]) - ref_xy) >= min_dist:
                 return np.array([x, y])
-        # Fallback: ponto fixo
-        return ref_xy + np.array([min_dist * 1.5, 0.0])
+        # Fallback: ponto mais distante possível garantindo clipping
+        x = np.clip(ref_xy[0] + min_dist, _RANGE_X_POS[0], _RANGE_X_POS[1])
+        y = np.clip(ref_xy[1], _RANGE_Y_POS[0], _RANGE_Y_POS[1])
+        return np.array([x, y])
 
     @staticmethod
     def _zangle_to_quat(zangle: float) -> np.ndarray:
@@ -315,6 +333,12 @@ class MuJoCoUR3PushSimpleWarpEnv:
         # É um array pequeno [N, ndof] — overhead de sync mínimo.
         qfrc_post = self._d_gpu.qfrc_actuator.numpy() if self.torque_penalty_scale > 0 else None  # [N, ndof]
 
+        if self.action_rate_penalty_scale > 0:
+            action_rate_penalty = -self.action_rate_penalty_scale * np.sum(np.square(actions - self.previous_action), axis=1)
+        else:
+            action_rate_penalty = None
+        self.previous_action = actions.copy()
+
         # 7. Obs, reward, done
         obs = self._get_obs_batch()
         rewards = self._compute_rewards(
@@ -323,10 +347,11 @@ class MuJoCoUR3PushSimpleWarpEnv:
             xanchor=xanchor,
             xaxis=xaxis,
             qfrc_post=qfrc_post,
+            action_rate_penalty=action_rate_penalty,
         )
         terminateds = self._compute_terminated(obs["achieved_goal"], obs["desired_goal"])
         truncateds = np.zeros(self.nworld, dtype=bool)
-        infos = [{"is_success": bool(terminateds[i])} for i in range(self.nworld)]
+        infos = [{"is_success": bool(dist < _THRESHOLD_POS)} for dist in np.linalg.norm(obs["desired_goal"] - obs["achieved_goal"], axis=1)]
 
         return obs, rewards, terminateds, truncateds, infos
 
@@ -347,6 +372,13 @@ class MuJoCoUR3PushSimpleWarpEnv:
 
         ee_pos  = site_xpos[:, self._ee_site_id,  :2]  # [N, 2]
         obj_pos = site_xpos[:, self._obj_site_id, :2]   # [N, 2]
+
+        # Shield immediately against NaNs and astronomical divergence values
+        ee_pos = np.nan_to_num(ee_pos, nan=0.0, posinf=0.0, neginf=0.0)
+        ee_pos = np.clip(ee_pos, -10.0, 10.0)
+        
+        obj_pos = np.nan_to_num(obj_pos, nan=0.0, posinf=0.0, neginf=0.0)
+        obj_pos = np.clip(obj_pos, -10.0, 10.0)
 
         # Adiciona ruído Gaussiano leve (replica comportamento do env original)
         obj_pos = obj_pos + self.rng.normal(0, 0.0001, obj_pos.shape)
@@ -375,7 +407,8 @@ class MuJoCoUR3PushSimpleWarpEnv:
                           site_xpos_pre: np.ndarray,
                           xanchor: np.ndarray = None,
                           xaxis: np.ndarray = None,
-                          qfrc_post: np.ndarray = None) -> np.ndarray:
+                          qfrc_post: np.ndarray = None,
+                          action_rate_penalty: np.ndarray = None) -> np.ndarray:
         """Calcula recompensas para N mundos.
 
         Args:
@@ -385,6 +418,7 @@ class MuJoCoUR3PushSimpleWarpEnv:
             xanchor:        [N, ndof, 3] — âncora de cada joint (pré-step)
             xaxis:          [N, ndof, 3] — eixo de cada joint (pré-step)
             qfrc_post:      [N, ndof] — força dos atuadores pós-step (ou None)
+            action_rate_penalty: [N] — penalidade de smoothness pré-calculada (ou None)
 
         Returns:
             rewards: [N] — float
@@ -433,14 +467,29 @@ class MuJoCoUR3PushSimpleWarpEnv:
             if self.manipulability_metric == "yoshikawa":
                 # w = sqrt(det(J J^T))  — volume of velocity ellipsoid; 0 at singularities
                 JJT = J @ J.transpose(0, 2, 1)              # [N, 3, 3]
+                JJT = np.nan_to_num(JJT, nan=0.0, posinf=0.0, neginf=0.0)
                 dets = np.linalg.det(JJT)                   # [N]
+                dets = np.nan_to_num(dets, nan=0.0, posinf=0.0, neginf=0.0)
                 w = np.sqrt(np.maximum(0.0, dets))          # [N]
             else:  # "min_sv"
                 # Smallest singular value of J — most direct proximity measure
-                sv = np.linalg.svd(J, compute_uv=False)     # [N, 3] (sorted descending)
+                J_sanitized = np.nan_to_num(J, nan=0.0, posinf=0.0, neginf=0.0)
+                sv = np.linalg.svd(J_sanitized, compute_uv=False)     # [N, 3] (sorted descending)
                 w = sv[:, -1]                               # [N] — smallest singular value
 
             rewards += self.manipulability_reward_scale * w
+
+        if action_rate_penalty is not None:
+            rewards += action_rate_penalty
+
+        if self.success_bonus > 0:
+            success = dist_obj_tgt < _THRESHOLD_POS
+            rewards += self.success_bonus * success.astype(np.float32)
+
+        # Shield against any remaining NaNs to prevent PPO corruption
+        rewards = np.nan_to_num(rewards, nan=-100.0, posinf=-100.0, neginf=-100.0)
+        # Shield against astronomical divergence values (e.g. -1e30) blowing up the critic
+        rewards = np.clip(rewards, -100.0, 100.0)
 
         return rewards
 
@@ -452,8 +501,10 @@ class MuJoCoUR3PushSimpleWarpEnv:
         Returns:
             terminated: [N] — bool
         """
-        dist = np.linalg.norm(desired_goal - achieved_goal, axis=1)
-        return dist < _THRESHOLD_POS
+        if getattr(self, 'early_termination_on_success', False):
+            dist = np.linalg.norm(desired_goal - achieved_goal, axis=1)
+            return dist < _THRESHOLD_POS
+        return np.zeros(self.nworld, dtype=bool)
 
     # -----------------------------------------------------------------------
     # Utilitários

@@ -26,6 +26,7 @@ except ImportError:
 from ur3_push_rl_sb3.utils import parse_args, get_run_name, get_log_paths
 from stable_baselines3.common.vec_env import VecVideoRecorder
 from stable_baselines3 import PPO
+import json
 import logging
 import time
 
@@ -63,6 +64,19 @@ if len(config.eVideoName) > 0 and "Ros" not in config.eEnvStr:
     os.makedirs(video_path, exist_ok=True)
 
 
+# Load training config FIRST so we inherit parameters like numStackedObs
+_search_eval_path = config.evalPath if config.evalPath else os.path.dirname(eval_path)
+if 'best_model.zip' in _search_eval_path:
+    _search_eval_path = os.path.dirname(_search_eval_path)
+if 'evaluation' in _search_eval_path:
+    _search_eval_path = os.path.dirname(_search_eval_path)
+
+with open(os.path.join(_search_eval_path, 'logs', 'config.txt'), 'r') as f:
+    train_config = json.load(f)
+
+for k, v in train_config.items():
+    if not hasattr(config, k) or getattr(config, k) is None:
+        setattr(config, k, v)
 
 # environment
 # object params
@@ -120,6 +134,17 @@ if "Simple" not in config.eEnvStr:
         "use_obs_history": config.useGRUFeatExtractor,
         "num_stack_obs": config.numStackedObs
     })
+else:
+    env_kwargs.update({
+        "ee_to_obj_reward_scale":      config.eeToObjRewardScale,
+        "torque_penalty_scale":        config.torquePenaltyScale,
+        "manipulability_reward_scale": config.manipulabilityRewardScale,
+        "manipulability_metric":       config.manipulabilityMetric,
+        "action_rate_penalty_scale":   config.actionRatePenaltyScale,
+        "success_bonus":               config.successBonus,
+        "early_termination_on_success": bool(config.earlyTerminationOnSuccess),
+        "randomize_initial_joints":    bool(config.randomizeInitialJoints),
+    })
 
 env_kwargs.update({"render_mode": render_mode, 
                     "use_sim_config": config.eUseSimConfig,
@@ -145,8 +170,15 @@ if config.thresholdLatentSpace != config.eThresholdLatentSpace:
 
 env = gym.envs.make(config.eEnvStr, **env_kwargs)
 
+if "SimpleEnv" in config.eEnvStr and config.numStackedObs is not None:
+    from stable_baselines3.common.vec_env import DummyVecEnv, VecFrameStack
+    venv = DummyVecEnv([lambda: env])
+    venv = VecFrameStack(venv, n_stack=config.numStackedObs)
+else:
+    venv = env
+
 # load best model
-model = PPO.load(path=os.path.join(eval_path,"best_model"), env=env)
+model = PPO.load(path=os.path.join(eval_path,"best_model"), env=venv)
 venv = model.get_env()
 venv.seed(config.eEvalSeed)
 
@@ -209,6 +241,7 @@ for i in range(0,config.eNumEvalEpisodes):
 
     # distance at the end of an episode
     distance_pos[i,2] = info[0]["dist_pos"]
+    success[i,-1] = info[0]["is_success"]
 
     rewards[i] = sum_ep_rewards
     if "num_corrective_movements" in info[0].keys():
@@ -233,3 +266,4 @@ if "num_corrective_movements" in info[0].keys():
     print(f"mean num_dist_corrections: {np.mean(num_dist_corrections):.2f} +/- {np.std(num_dist_corrections):.2f}, min num_dist_corrections: {int(np.min(num_dist_corrections))}, max num_dist_corrections: {int(np.max(num_dist_corrections))}")
 print()
 
+venv.close()

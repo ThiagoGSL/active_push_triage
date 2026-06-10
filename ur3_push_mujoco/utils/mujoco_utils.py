@@ -295,6 +295,18 @@ class MuJoCoUR3PushController():
         # Without this, Kp is implicitly 1.0, causing extremely sluggish tracking.
         dq_d = dq_d * 10.0
 
+        # Null-space posture control to prevent drift
+        q_current = data.qpos[self.panda_joint_qposadr]
+        q_nominal = np.array([0.0, -1.5708, 1.5708, -1.5708, -1.5708, 0.0]) # UR3 Ready Pose
+        dq_null = 2.0 * (q_nominal - q_current) # Secondary task velocity (Kp_null = 2.0)
+        
+        # Project secondary task into the null space of the Jacobian: I - pinv(J) * J
+        I = np.eye(6)
+        null_space_projector = I - jac_conepos_pinv @ jac_conepos
+        dq_d_null = null_space_projector @ dq_null
+        
+        dq_d = dq_d + dq_d_null
+
         # set desired joint velocities and ensure joint position and velocity limits
         data.ctrl[self.panda_actuator_ids] = self.ensure_joint_pos_velo_limits(data, dq_d)
     
@@ -471,6 +483,16 @@ class MuJoCoUR3PushControllerBatched:
             # [M, 6, 4]
             # dq = Kp * J_pinv @ error
             dq_d = 10.0 * np.einsum('mij,mj->mi', jac_pinv, task_error)  # [M, 6]
+
+            # --- Null-space posture control ---
+            q_nominal = np.array([0.0, -1.5708, 1.5708, -1.5708, -1.5708, 0.0], dtype=np.float64)
+            q_current = qpos_batch[idx][:, self.panda_joint_qposadr] # [M, 6]
+            dq_null = 2.0 * (q_nominal[None, :] - q_current) # [M, 6]
+            I = np.eye(6)
+            projector = I - np.einsum('mik,mkj->mij', jac_pinv, jac_conepos) # [M, 6, 6]
+            dq_d_null = np.einsum('mij,mj->mi', projector, dq_null)
+            
+            dq_d = dq_d + dq_d_null
         except np.linalg.LinAlgError:
             # SVD nao convergiu (fallback: sem controle)
             return ctrl_batch
@@ -610,6 +632,15 @@ class MuJoCoUR3PushControllerBatched:
                 continue
             dq_d = jac_pinv @ conepos_error
             dq_d = dq_d * 10.0  # Kp
+
+            # --- Null-space posture control ---
+            q_nominal = np.array([0.0, -1.5708, 1.5708, -1.5708, -1.5708, 0.0], dtype=np.float64)
+            q_current = qpos_batch[i][self.panda_joint_qposadr]
+            dq_null = 2.0 * (q_nominal - q_current)
+            I = np.eye(6)
+            null_space_projector = I - jac_pinv @ jac_conepos
+            dq_d_null = null_space_projector @ dq_null
+            dq_d = dq_d + dq_d_null
 
             # --- Clipping de limites de velocidade e posição ---
             q_i = qpos_batch[i][self.panda_joint_qposadr]

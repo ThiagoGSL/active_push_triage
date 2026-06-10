@@ -255,9 +255,9 @@ class BasePushEnv(BaseGoalEnv):
         # sample rotation about z-axis
         z_angle = (np.pi - (-np.pi)) * self.np_random.random() - np.pi
         # sample x-pos
-        x_pos = self.initial_ee_xypos[0] + self.np_random.uniform(np.amin(self.range_obj_x_pos), np.amax(self.range_obj_x_pos))
+        x_pos = self.np_random.uniform(np.amin(self.range_obj_x_pos), np.amax(self.range_obj_x_pos))
         # sample y-pos 
-        y_pos = self.initial_ee_xypos[1] + self.np_random.uniform(np.amin(self.range_obj_y_pos), np.amax(self.range_obj_y_pos))
+        y_pos = self.np_random.uniform(np.amin(self.range_obj_y_pos), np.amax(self.range_obj_y_pos))
 
         pos = np.array([x_pos, y_pos, obj_height + self.height_table + 0.001])
         quat = rotations_utils.mujocoQuat_to_tftransformationsQuat(rotations.euler2quat(np.array([0,0,z_angle]))) # tf.transformations order
@@ -273,10 +273,10 @@ class BasePushEnv(BaseGoalEnv):
         # sample rotation about z-axis
         z_angle = (np.pi - (-np.pi)) * self.np_random.random() - np.pi
         # sample x-pos using target-specific range
-        x_pos = self.initial_ee_xypos[0] + self.np_random.uniform(
+        x_pos = self.np_random.uniform(
             np.amin(self.range_target_x_pos), np.amax(self.range_target_x_pos))
         # sample y-pos using target-specific range
-        y_pos = self.initial_ee_xypos[1] + self.np_random.uniform(
+        y_pos = self.np_random.uniform(
             np.amin(self.range_target_y_pos), np.amax(self.range_target_y_pos))
 
         pos = np.array([x_pos, y_pos, obj_height + self.height_table + 0.001])

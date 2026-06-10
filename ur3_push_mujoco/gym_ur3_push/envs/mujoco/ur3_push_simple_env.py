@@ -25,7 +25,11 @@ class MuJoCoUR3PushSimpleEnv(MuJoCoUR3PushBaseEnv):
                 ee_to_obj_reward_scale=0.2,
                 torque_penalty_scale=0.001,
                 manipulability_reward_scale=0.0,
-                manipulability_metric="yoshikawa"):
+                manipulability_metric="yoshikawa",
+                action_rate_penalty_scale=0.0,
+                success_bonus=0.0,
+                early_termination_on_success=False,
+                randomize_initial_joints=False):
         
         # initial joint pos — UR3 ready pose (garra acima da mesa de trabalho)
         # Ângulos em radianos: configuração de elbow-up padrão para pushing
@@ -61,6 +65,11 @@ class MuJoCoUR3PushSimpleEnv(MuJoCoUR3PushBaseEnv):
         assert manipulability_metric in ("yoshikawa", "min_sv"), \
             f"manipulability_metric must be 'yoshikawa' or 'min_sv', got '{manipulability_metric}'"
         self.manipulability_metric = manipulability_metric
+        self.action_rate_penalty_scale = action_rate_penalty_scale
+        self.success_bonus = success_bonus
+        self.early_termination_on_success = early_termination_on_success
+        self.randomize_initial_joints = randomize_initial_joints
+        self.previous_action = np.zeros(2, dtype=np.float32)
 
         
         MuJoCoUR3PushBaseEnv.__init__(self,
@@ -73,10 +82,10 @@ class MuJoCoUR3PushSimpleEnv(MuJoCoUR3PushBaseEnv):
                                 # So max safe x_offset = 0.65 - 0.35 = 0.30m
                                 # Both object AND target use the same safe ranges to guarantee
                                 # they always spawn within the robot's reachable workspace.
-                                object_params={"range_x_pos":        np.array([0.07, 0.27]),
-                                               "range_y_pos":        np.array([-0.12, 0.12]),
-                                               "range_target_x_pos": np.array([0.07, 0.27]),
-                                               "range_target_y_pos": np.array([-0.12, 0.12])},
+                                object_params={"range_x_pos":        np.array([0.25, 0.50]),
+                                               "range_y_pos":        np.array([-0.20, 0.20]),
+                                               "range_target_x_pos": np.array([0.25, 0.50]),
+                                               "range_target_y_pos": np.array([-0.20, 0.20])},
                                 object_reset_options=object_reset_options,
                                 fixed_object_height=fixed_object_height,
                                 sample_mass_slidfric_from_uniform_dist=sample_mass_slidfric_from_uniform_dist,
@@ -102,9 +111,21 @@ class MuJoCoUR3PushSimpleEnv(MuJoCoUR3PushBaseEnv):
         })
 
     def _reset_callback(self, options={}):
-        pass
+        self.previous_action = np.zeros(2, dtype=np.float32)
+        self._current_action_rate_penalty = 0.0
+        if self.randomize_initial_joints:
+            # Add uniform noise [-0.05, 0.05] rad to all robot joints
+            noise = self.rng_noise.uniform(-0.05, 0.05, size=6)
+            self.data.qpos[:6] += noise
+            mujoco.mj_forward(self.model, self.data)
 
     def _step_callback(self, action):
+        if getattr(self, 'action_rate_penalty_scale', 0.0) > 0:
+            self._current_action_rate_penalty = -self.action_rate_penalty_scale * np.sum(np.square(action - getattr(self, 'previous_action', np.zeros(2))))
+        else:
+            self._current_action_rate_penalty = 0.0
+        self.previous_action = action.copy()
+
         # Compute the desired EE position from the current position + scaled action (called once per gym step)
         self.controller.update_desired_pose(self.model, self.data, action * self.action_scaling_factor)
         # Run the IK controller at EVERY simulation timestep (substep loop).
@@ -115,6 +136,11 @@ class MuJoCoUR3PushSimpleEnv(MuJoCoUR3PushBaseEnv):
             mujoco.mj_step(self.model, self.data, nstep=1)
         self.render()
         
+    def compute_terminated(self, achieved_goal, desired_goal, info={}):
+        if getattr(self, 'early_termination_on_success', False):
+            return bool(self._is_success(achieved_goal, desired_goal)[0])
+        return False
+        
     def compute_reward(self, achieved_goal, desired_goal, info):
         # Calculation of the reward must be vectorized (HerReplayBuffer, stable-baselines3)
         batch_size = achieved_goal.shape[0] if len(achieved_goal.shape) > 1 else 1
@@ -122,8 +148,10 @@ class MuJoCoUR3PushSimpleEnv(MuJoCoUR3PushBaseEnv):
             achieved_goal = achieved_goal.reshape(batch_size,-1)
             desired_goal = desired_goal.reshape(batch_size,-1)
 
+        is_success_arr = self._is_success(achieved_goal, desired_goal)
+
         if self.sparse_reward:
-            reward = -np.bitwise_not(self._is_success(achieved_goal, desired_goal)).astype(np.float32)
+            reward = -np.bitwise_not(is_success_arr).astype(np.float32)
         else:
             # Primary reward: -dist(object, target) — push phase
             reward = -self._calc_dist_pos(achieved_goal, desired_goal)
@@ -137,6 +165,9 @@ class MuJoCoUR3PushSimpleEnv(MuJoCoUR3PushBaseEnv):
                 ee_pos = self.data.site_xpos[self.ee_site_id][:2]
                 dist_ee_to_obj = np.linalg.norm(ee_pos - achieved_goal[0, :2])
                 reward = reward - self.ee_to_obj_reward_scale * dist_ee_to_obj
+
+            if batch_size == 1 and getattr(self, '_current_action_rate_penalty', 0.0) != 0.0:
+                reward = reward + self._current_action_rate_penalty
 
             # Torque penalty: penalises joint effort — encourages smooth, efficient motions.
             # Only applied during env steps (batch_size==1); skipped for HER replay.
@@ -170,6 +201,9 @@ class MuJoCoUR3PushSimpleEnv(MuJoCoUR3PushBaseEnv):
                     w = float(sv[-1])
 
                 reward = reward + self.manipulability_reward_scale * w
+
+        if getattr(self, 'success_bonus', 0.0) > 0 and batch_size == 1 and is_success_arr[0]:
+            reward = reward + self.success_bonus
 
         assert len(reward.shape) == 1
         assert reward.shape[0] == batch_size
