@@ -113,7 +113,9 @@ class MuJoCoUR3PushSimpleWarpEnv:
 
         # --- Carrega modelo CPU (UMA VEZ) ---
         xml = mujoco_utils.generate_model_xml_string(
-            robot_gravity_compensation=1, use_sim_config=True
+            robot_gravity_compensation=1, use_sim_config=True,
+            obj_type="cylinder",
+            obj_size_0=0.055, obj_size_1=0.055, obj_height=0.04,
         )
         original_cwd = os.getcwd()
         os.chdir(os.path.join(ur3_push_mujoco.__path__[0], "assets"))
@@ -228,7 +230,7 @@ class MuJoCoUR3PushSimpleWarpEnv:
 
             # Amostra pose do objeto
             obj_xy = self._sample_xy_away_from(self.initial_ee_xypos, min_dist=0.1)
-            obj_z  = _HEIGHT_TABLE + 0.04 + 0.001  # altura padrao (caixa 4cm)
+            obj_z  = _HEIGHT_TABLE + 0.04 + 0.001  # altura padrao (cilindro: raio=5.5cm, meia-altura=4cm)
             obj_zangle = self.rng.uniform(-np.pi, np.pi)
             obj_quat = self._zangle_to_quat(obj_zangle)
 

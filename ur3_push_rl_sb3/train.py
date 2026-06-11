@@ -181,7 +181,7 @@ def main():
                 randomize_initial_joints=bool(config.randomizeInitialJoints),
             )
             
-            if config.numStackedObs is not None:
+            if getattr(config, 'numStackedObs', None) is not None:
                 from stable_baselines3.common.vec_env import VecFrameStack
                 print(f"[WarpVecEnv] Aplicando Frame Stacking (n={config.numStackedObs})")
                 train_envs = VecFrameStack(train_envs, n_stack=config.numStackedObs)
