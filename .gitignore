@@ -136,6 +136,7 @@ videos
 pos_*_controller_*.npz
 image_*.png
 
-# Dados de treinamento RL (modelos, logs, tensorboard) — nao versionar
-ur3_push_data/rl/
-
+# Dados de treinamento RL — versionar runs mas excluir videos e arquivos pesados
+ur3_push_data/rl/videos/
+ur3_push_data/rl/**/events.out.tfevents.*
+ur3_push_data/rl/**/*.0
