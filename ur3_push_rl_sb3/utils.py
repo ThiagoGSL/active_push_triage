@@ -17,6 +17,7 @@ def parse_args():
     train_eval_group.add_argument("--useFingertipSensor", type=int, choices=[0, 1], default=0, help="use fingertip sensor data? (only used if ee='fingertip')")
     train_eval_group.add_argument("--useSimConfig", type=int, choices=[0, 1], default=1, help="use sim or real controller + camera config? (real controller config fixes some problems with the real robot controller")
     train_eval_group.add_argument("--useWarp", type=int, choices=[0, 1], default=0, help="use MuJoCo Warp GPU-batched training? (1=WarpVecEnv, 0=SubprocVecEnv CPU). numTrain becomes nworld (N parallel GPU worlds). Requires NVIDIA GPU.")
+    train_eval_group.add_argument("--normalizeReward", type=int, choices=[0, 1], default=1, help="wrap train_envs with VecNormalize (norm_obs=False, norm_reward=True) to stabilise PPO Critic when using Warp. Stats saved in checkpoint as vecnormalize.pkl.")
     train_eval_group.add_argument("--resumePath", type=str, default=None,
                                   help="Path to an existing run's save_path (e.g. '.../rl/MujocoUR3PushSimpleEnv_20260608_154450') "
                                        "to resume training from its latest checkpoint. When set, --commentLogPath and all other "

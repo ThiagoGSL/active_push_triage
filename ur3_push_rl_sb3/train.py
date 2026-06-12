@@ -6,7 +6,7 @@ import torch
 from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import CallbackList, EvalCallback, StopTrainingOnMaxEpisodes
 from stable_baselines3.common.logger import configure
-from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv
+from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecNormalize
 from ur3_push_rl_sb3.make_envs import make_vec_envs, make_warp_env
 from ur3_push_rl_sb3.utils import (parse_args, 
                                      get_run_name, 
@@ -186,6 +186,21 @@ def main():
                 print(f"[WarpVecEnv] Aplicando Frame Stacking (n={config.numStackedObs})")
                 train_envs = VecFrameStack(train_envs, n_stack=config.numStackedObs)
                 eval_env = VecFrameStack(eval_env, n_stack=config.numStackedObs)
+
+            if getattr(config, 'useWarp', 0) and getattr(config, 'normalizeReward', True):
+                # VecNormalize: normaliza apenas o reward (obs ja sao bem-condicionadas)
+                # eval_env: norm_reward=False para que as metricas de avaliacao sejam legíveis
+                vecnorm_path = os.path.join(cp_path, 'vecnormalize.pkl') if continue_train not in ['', 'r'] else None
+                if vecnorm_path and os.path.exists(vecnorm_path):
+                    print(f"[VecNormalize] Restaurando estatisticas de: {vecnorm_path}")
+                    train_envs = VecNormalize.load(vecnorm_path, train_envs)
+                    train_envs.training = True
+                    train_envs.norm_reward = True
+                else:
+                    print("[VecNormalize] Inicializando normalizacao de reward (norm_obs=False, norm_reward=True)")
+                    train_envs = VecNormalize(train_envs, norm_obs=False, norm_reward=True, clip_reward=10.0)
+                # Eval env: compartilha stats de obs mas NAO normaliza reward (para avaliacao legivel)
+                eval_env = VecNormalize(eval_env, norm_obs=False, norm_reward=False, training=False)
         else:
             # --- CPU: SubprocVecEnv (comportamento original) ---
             train_envs, eval_env = make_vec_envs(config.envStr, 
@@ -253,6 +268,10 @@ def main():
         else:
             # continue_train == "y"
             model = PPO.load(path=os.path.join(cp_path,"model"), env=train_envs)
+            # Restaurar VecNormalize se existir (ja carregado acima, mas garante sync)
+            vecnorm_path = os.path.join(cp_path, 'vecnormalize.pkl')
+            if isinstance(train_envs, VecNormalize) and os.path.exists(vecnorm_path):
+                train_envs.load(vecnorm_path, train_envs)
     
         # logger
         logger = configure(log_path, ["stdout", "csv", "tensorboard"])

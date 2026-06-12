@@ -1,6 +1,7 @@
 import os, shutil, pickle
 from stable_baselines3.common.callbacks import BaseCallback
 from stable_baselines3.common.vec_env.base_vec_env import VecEnv
+from stable_baselines3.common.vec_env import VecNormalize
 
 class CustomCheckpointCallback(BaseCallback):
 
@@ -60,6 +61,13 @@ class CustomCheckpointCallback(BaseCallback):
             # save RNG states
             with open(os.path.join(self.cp_path,"rng_states_gymenvs.pkl"), mode="wb") as rng_env_file:
                 pickle.dump(rng_states_envs, rng_env_file)
+            # save VecNormalize stats (if applicable)
+            env = self.model.get_vec_normalize_env()
+            if env is not None:
+                vecnorm_path = os.path.join(self.cp_path, 'vecnormalize.pkl')
+                env.save(vecnorm_path)
+                if self.verbose >= 2:
+                    print(f"[VecNormalize] Stats salvas em: {vecnorm_path}")
             # copy log and evaluation files 
             shutil.copytree(src=os.path.join(self.save_path,self.log_dir_name), dst=os.path.join(self.cp_path,self.log_dir_name))
             shutil.copytree(src=os.path.join(self.save_path,self.eval_dir_name), dst=os.path.join(self.cp_path,self.eval_dir_name))
