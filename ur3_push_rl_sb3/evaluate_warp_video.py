@@ -15,6 +15,7 @@ def main():
     parser.add_argument("--eVideoName", type=str, default="warp_eval_video", help="Name of the output video")
     parser.add_argument("--numStackedObs", type=int, default=4, help="Number of stacked observations")
     parser.add_argument("--eNumEvalEpisodes", type=int, default=5, help="Number of episodes to record")
+    parser.add_argument("--dynamicTarget", type=str, choices=["none", "circle", "rectangle"], default="none", help="Move the target dynamically ('circle' or 'rectangle')")
     args = parser.parse_args()
 
     # Load config
@@ -63,11 +64,37 @@ def main():
 
     successes = []
     episodes = 0
+    steps_in_episode = 0
+    
+    if args.dynamicTarget != "none":
+        # Força o objeto a surgir sempre no centro geométrico da mesa
+        warp_wenv._wenv._sample_xy_away_from = lambda *args, **kwargs: np.array([0.375, 0.0])
+
     obs = eval_env.reset()
 
     while episodes < args.eNumEvalEpisodes:
+        if args.dynamicTarget == "circle":
+            t = steps_in_episode * 0.025  # velocidade angular (reduzida pela metade)
+            warp_wenv._wenv._target_xypos[0, 0] = 0.375 + 0.08 * np.cos(t) # raio reduzido para 8cm
+            warp_wenv._wenv._target_xypos[0, 1] = 0.0 + 0.08 * np.sin(t)
+        elif args.dynamicTarget == "rectangle":
+            # Perímetro paramétrico (0 a 4)
+            t = (steps_in_episode * 0.0075) % 4 # velocidade linear (reduzida pela metade)
+            if t < 1:   # Aresta superior (esq -> dir)
+                dx, dy = -0.08 + (t - 0) * 0.16,  0.06
+            elif t < 2: # Aresta direita (cima -> baixo)
+                dx, dy =  0.08,  0.06 - (t - 1) * 0.12
+            elif t < 3: # Aresta inferior (dir -> esq)
+                dx, dy =  0.08 - (t - 2) * 0.16, -0.06
+            else:       # Aresta esquerda (baixo -> cima)
+                dx, dy = -0.08, -0.06 + (t - 3) * 0.12
+            
+            warp_wenv._wenv._target_xypos[0, 0] = 0.375 + dx
+            warp_wenv._wenv._target_xypos[0, 1] = 0.0 + dy
+            
         action, _ = model.predict(obs, deterministic=True)
         obs, r, dones, infos = eval_env.step(action)
+        steps_in_episode += 1
         
         # Sync GPU to CPU for rendering
         d.qpos[:] = warp_wenv._wenv._d_gpu.qpos.numpy()[0]
@@ -102,6 +129,7 @@ def main():
             successes.append(is_success)
             print(f"Episode {episodes}: Success = {is_success}")
             episodes += 1
+            steps_in_episode = 0
 
     writer.close()
     
