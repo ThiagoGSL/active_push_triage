@@ -18,6 +18,7 @@ def parse_args():
     train_eval_group.add_argument("--useSimConfig", type=int, choices=[0, 1], default=1, help="use sim or real controller + camera config? (real controller config fixes some problems with the real robot controller")
     train_eval_group.add_argument("--useWarp", type=int, choices=[0, 1], default=0, help="use MuJoCo Warp GPU-batched training? (1=WarpVecEnv, 0=SubprocVecEnv CPU). numTrain becomes nworld (N parallel GPU worlds). Requires NVIDIA GPU.")
     train_eval_group.add_argument("--normalizeReward", type=int, choices=[0, 1], default=1, help="wrap train_envs with VecNormalize (norm_obs=False, norm_reward=True) to stabilise PPO Critic when using Warp. Stats saved in checkpoint as vecnormalize.pkl.")
+    train_eval_group.add_argument("--algorithm", type=str, choices=["ppo", "sac"], default="ppo", help="RL algorithm to use: 'ppo' (Proximal Policy Optimization, on-policy) or 'sac' (Soft Actor-Critic, off-policy). Default: ppo.")
     train_eval_group.add_argument("--resumePath", type=str, default=None,
                                   help="Path to an existing run's save_path (e.g. '.../rl/MujocoUR3PushSimpleEnv_20260608_154450') "
                                        "to resume training from its latest checkpoint. When set, --commentLogPath and all other "
@@ -84,6 +85,20 @@ def parse_args():
     ppo_group.add_argument("--useGRUFeatExtractor", type=int, choices=[0, 1], default=0, help="whether to use a custom GRU feature extractor (otherwise: SB3 CombinedExtractor is used)")
     ppo_group.add_argument("--GRUFeaturesDim", type=int, default=32, help="number of features in hidden state (only used if custom GRU feature extractor is used)")
     ppo_group.add_argument("--totalLearningTimesteps", type=int, default=int(3e6), help="max number of learning timesteps")
+
+    ############################################
+    # params SAC
+    ############################################
+    sac_group = config_parser.add_argument_group("SAC", "params Soft Actor-Critic (only used when --algorithm sac)")
+    sac_group.add_argument("--sacLr", type=float, default=3e-4, help="SAC learning rate")
+    sac_group.add_argument("--sacBufferSize", type=int, default=int(1e6), help="SAC replay buffer size (number of transitions)")
+    sac_group.add_argument("--sacBatchSize", type=int, default=256, help="SAC minibatch size for gradient updates")
+    sac_group.add_argument("--sacTau", type=float, default=0.005, help="SAC soft update coefficient (Polyak) for target network")
+    sac_group.add_argument("--sacGamma", type=float, default=0.99, help="SAC discount factor")
+    sac_group.add_argument("--sacLearningStarts", type=int, default=100, help="SAC number of steps before learning starts (fills buffer first)")
+    sac_group.add_argument("--sacTrainFreq", type=int, default=1, help="SAC update the model every sacTrainFreq steps")
+    sac_group.add_argument("--sacGradientSteps", type=int, default=1, help="SAC number of gradient steps per update (-1: equal to train_freq)")
+    sac_group.add_argument("--sacEntCoef", type=str, default="auto", help="SAC entropy regularization coefficient ('auto' for automatic tuning, or a float)")
 
     ############################################
     # callback config

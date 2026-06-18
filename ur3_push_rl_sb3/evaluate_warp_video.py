@@ -3,11 +3,25 @@ import argparse
 import json
 import numpy as np
 import imageio
-from stable_baselines3 import PPO
+from stable_baselines3 import PPO, SAC
 from stable_baselines3.common.vec_env import VecFrameStack
 import mujoco
 
 from ur3_push_rl_sb3.make_envs import make_warp_env
+
+def _load_model_by_algorithm(config_path: str, model_path: str, env):
+    """Carrega PPO ou SAC detectando automaticamente o algoritmo do config.txt.
+    Runs antigas sem o campo 'algorithm' defaultam para PPO (retrocompatibilidade).
+    """
+    algorithm = "ppo"
+    if os.path.exists(config_path):
+        with open(config_path, "r") as f:
+            algorithm = json.load(f).get("algorithm", "ppo")
+    algorithm = algorithm.lower()
+    print(f"[Evaluate] Detected algorithm: {algorithm.upper()}")
+    if algorithm == "sac":
+        return SAC.load(model_path, env=env)
+    return PPO.load(model_path, env=env)
 
 def main():
     parser = argparse.ArgumentParser()
@@ -48,7 +62,8 @@ def main():
     if not os.path.exists(model_path + ".zip"):
         model_path = os.path.join(args.evalPath, "best_model")
     
-    model = PPO.load(model_path, env=eval_env)
+    config_path = os.path.join(args.evalPath, "logs", "config.txt")
+    model = _load_model_by_algorithm(config_path, model_path, eval_env)
 
     # Prepare renderer
     m = warp_wenv._wenv._mjm

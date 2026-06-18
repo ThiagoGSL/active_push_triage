@@ -25,7 +25,7 @@ except ImportError:
 
 from ur3_push_rl_sb3.utils import parse_args, get_run_name, get_log_paths
 from stable_baselines3.common.vec_env import VecVideoRecorder
-from stable_baselines3 import PPO
+from stable_baselines3 import PPO, SAC
 import json
 import logging
 import time
@@ -177,8 +177,13 @@ if "SimpleEnv" in config.eEnvStr and config.numStackedObs is not None:
 else:
     venv = env
 
-# load best model
-model = PPO.load(path=os.path.join(eval_path,"best_model"), env=venv)
+# load best model — detects algorithm from config.txt (retrocompativel com runs PPO sem o campo)
+_algorithm = train_config.get("algorithm", "ppo").lower()
+print(f"[Evaluate] Detected algorithm: {_algorithm.upper()}")
+if _algorithm == "sac":
+    model = SAC.load(path=os.path.join(eval_path,"best_model"), env=venv)
+else:
+    model = PPO.load(path=os.path.join(eval_path,"best_model"), env=venv)
 venv = model.get_env()
 venv.seed(config.eEvalSeed)
 

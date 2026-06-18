@@ -3,7 +3,7 @@ import os, sys, json, pickle, shutil
 import numpy as np
 import torch
 
-from stable_baselines3 import PPO
+from stable_baselines3 import PPO, SAC
 from stable_baselines3.common.callbacks import CallbackList, EvalCallback, StopTrainingOnMaxEpisodes
 from stable_baselines3.common.logger import configure
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecNormalize
@@ -17,6 +17,13 @@ from ur3_push_rl_sb3.utils import (parse_args,
 from ur3_push_rl_sb3.custom_callbacks import CustomCheckpointCallback
 from stable_baselines3.common.torch_layers import CombinedExtractor
 from ur3_push_rl_sb3.custom_features_extractors import GRUExtractor
+
+def _load_model_by_algorithm(algorithm: str, path: str, env):
+    """Loads a PPO or SAC model from a checkpoint, auto-detecting algorithm."""
+    algo = algorithm.lower() if algorithm else "ppo"
+    if algo == "sac":
+        return SAC.load(path=path, env=env)
+    return PPO.load(path=path, env=env)
 
 def main():
     config, cmd_args, config_parser = parse_args()
@@ -247,27 +254,66 @@ def main():
             else:
                 lr = config.ppolr
     
-            # PPO
-            model = PPO(
-                policy = "MultiInputPolicy",
-                env = train_envs,
-                learning_rate = lr,
-                n_steps = config.nSteps,
-                batch_size = config.batchSize,
-                n_epochs = config.nEpochs,
-                gamma = config.gamma,
-                clip_range = config.clipRange,
-                ent_coef = config.entCoef,
-                tensorboard_log=log_path, # log location of tensorboard (if None, no logging)
-                policy_kwargs = policy_kwargs,
-                verbose=1,
-                seed=config.trainSeed, # this also sets seed of envs
-                device=device
-            )
+            # Algorithm selection
+            algorithm = getattr(config, 'algorithm', 'ppo').lower()
+            if algorithm == "sac":
+                # SAC: off-policy, usa replay buffer
+                # policy_kwargs para SAC nao suporta share_features_extractor
+                sac_policy_kwargs = dict(net_arch=config.policyNetArch)
+                if config.useGRUFeatExtractor:
+                    sac_policy_kwargs.update(dict(
+                        features_extractor_class=GRUExtractor,
+                        features_extractor_kwargs={"features_dim": config.GRUFeaturesDim}
+                    ))
+                model = SAC(
+                    policy="MultiInputPolicy",
+                    env=train_envs,
+                    learning_rate=config.sacLr,
+                    buffer_size=config.sacBufferSize,
+                    batch_size=config.sacBatchSize,
+                    tau=config.sacTau,
+                    gamma=config.sacGamma,
+                    learning_starts=config.sacLearningStarts,
+                    train_freq=config.sacTrainFreq,
+                    gradient_steps=config.sacGradientSteps,
+                    ent_coef=config.sacEntCoef,
+                    policy_kwargs=sac_policy_kwargs,
+                    tensorboard_log=log_path,
+                    verbose=1,
+                    seed=config.trainSeed,
+                    device=device
+                )
+                print(f"[Algorithm] SAC | lr={config.sacLr} | buffer={config.sacBufferSize}")
+            else:
+                # PPO: on-policy (comportamento original)
+                model = PPO(
+                    policy = "MultiInputPolicy",
+                    env = train_envs,
+                    learning_rate = lr,
+                    n_steps = config.nSteps,
+                    batch_size = config.batchSize,
+                    n_epochs = config.nEpochs,
+                    gamma = config.gamma,
+                    clip_range = config.clipRange,
+                    ent_coef = config.entCoef,
+                    tensorboard_log=log_path,
+                    policy_kwargs = policy_kwargs,
+                    verbose=1,
+                    seed=config.trainSeed,
+                    device=device
+                )
+                print(f"[Algorithm] PPO | lr={lr if isinstance(lr, float) else 'linear_schedule'} | n_steps={config.nSteps}")
     
         else:
-            # continue_train == "y"
-            model = PPO.load(path=os.path.join(cp_path,"model"), env=train_envs)
+            # continue_train == "y": resume from checkpoint
+            # Detect algorithm from saved config to ensure correct class is used
+            _cfg_path = os.path.join(cp_path, "..", "logs", "config.txt")
+            _saved_algo = "ppo"
+            if os.path.exists(_cfg_path):
+                with open(_cfg_path) as _f:
+                    _saved_algo = json.load(_f).get("algorithm", "ppo")
+            model = _load_model_by_algorithm(_saved_algo, path=os.path.join(cp_path, "model"), env=train_envs)
+            print(f"[Resume] Loaded {_saved_algo.upper()} checkpoint from: {cp_path}")
             # Restaurar VecNormalize se existir (ja carregado acima, mas garante sync)
             vecnorm_path = os.path.join(cp_path, 'vecnormalize.pkl')
             if isinstance(train_envs, VecNormalize) and os.path.exists(vecnorm_path):
