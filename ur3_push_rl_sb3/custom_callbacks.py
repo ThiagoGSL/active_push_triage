@@ -1,6 +1,7 @@
 import os, shutil, pickle
 from stable_baselines3.common.callbacks import BaseCallback
 from stable_baselines3.common.vec_env.base_vec_env import VecEnv
+from stable_baselines3.common.vec_env import VecNormalize
 
 class CustomCheckpointCallback(BaseCallback):
 
@@ -41,14 +42,18 @@ class CustomCheckpointCallback(BaseCallback):
                 shutil.rmtree(self.cp_path) 
             
             # RNG states of all Gymnasium environments
+            # (opcional: WarpVecEnv nao expoe rng_states por mundo)
             rng_states_envs = {}
-            # train envs
-            rng_states_tmp = self.train_envs.get_attr("rng_states")
-            for i in range(0, self.train_envs.num_envs):
-                rng_states_envs.update({i: rng_states_tmp[i]})
-            # eval env
-            rng_states_tmp = self.eval_env.get_attr("rng_states")
-            rng_states_envs.update({self.train_envs.num_envs: rng_states_tmp[0]})
+            try:
+                # train envs
+                rng_states_tmp = self.train_envs.get_attr("rng_states")
+                for i in range(0, self.train_envs.num_envs):
+                    rng_states_envs.update({i: rng_states_tmp[i]})
+                # eval env
+                rng_states_tmp = self.eval_env.get_attr("rng_states")
+                rng_states_envs.update({self.train_envs.num_envs: rng_states_tmp[0]})
+            except (AttributeError, NotImplementedError):
+                pass  # WarpVecEnv: sem rng_states por mundo (GPU nao tem RNG sequencial)
 
             # save new checkpoint
             os.makedirs(self.cp_path, exist_ok=False)
@@ -56,6 +61,13 @@ class CustomCheckpointCallback(BaseCallback):
             # save RNG states
             with open(os.path.join(self.cp_path,"rng_states_gymenvs.pkl"), mode="wb") as rng_env_file:
                 pickle.dump(rng_states_envs, rng_env_file)
+            # save VecNormalize stats (if applicable)
+            env = self.model.get_vec_normalize_env()
+            if env is not None:
+                vecnorm_path = os.path.join(self.cp_path, 'vecnormalize.pkl')
+                env.save(vecnorm_path)
+                if self.verbose >= 2:
+                    print(f"[VecNormalize] Stats salvas em: {vecnorm_path}")
             # copy log and evaluation files 
             shutil.copytree(src=os.path.join(self.save_path,self.log_dir_name), dst=os.path.join(self.cp_path,self.log_dir_name))
             shutil.copytree(src=os.path.join(self.save_path,self.eval_dir_name), dst=os.path.join(self.cp_path,self.eval_dir_name))

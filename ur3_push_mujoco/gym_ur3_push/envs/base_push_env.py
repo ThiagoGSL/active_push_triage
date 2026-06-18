@@ -69,6 +69,10 @@ class BasePushEnv(BaseGoalEnv):
         self.range_obj_torsional_fric = object_params.get("range_torsional_fric", np.array([0.001, 0.01])) 
         self.range_obj_x_pos = object_params.get("range_x_pos", np.array([-0.1,0.1])) #[m]
         self.range_obj_y_pos = object_params.get("range_y_pos", np.array([-0.1,0.1])) #[m]
+        # Target uses its own ranges (fallback: same as object) to guarantee it spawns
+        # within the robot's reachable workspace.
+        self.range_target_x_pos = object_params.get("range_target_x_pos", self.range_obj_x_pos.copy()) #[m]
+        self.range_target_y_pos = object_params.get("range_target_y_pos", self.range_obj_y_pos.copy()) #[m]
         self.fixed_obj_height = fixed_object_height
 
         # sample mass and sliding friction coefficient from continuous uniform distribution?
@@ -135,11 +139,11 @@ class BasePushEnv(BaseGoalEnv):
         if "obj_quat" in options and options["obj_quat"] is not None:
             self.obj_start_quat = options["obj_quat"]
 
-        # sample new target pose
-        self.target_start_pos, self.target_start_quat = self._sample_object_pose(self.obj_height)
+        # sample new target pose (uses range_target_*_pos to stay within robot workspace)
+        self.target_start_pos, self.target_start_quat = self._sample_target_pose(self.obj_height)
         # Ensure target is at least 10cm away from the object
         while np.linalg.norm(self.target_start_pos[0:2] - self.obj_start_pos[0:2]) < 0.10:
-            self.target_start_pos, self.target_start_quat = self._sample_object_pose(self.obj_height)
+            self.target_start_pos, self.target_start_quat = self._sample_target_pose(self.obj_height)
 
         if "target_xy_pos" in options and options["target_xy_pos"] is not None:
             self.target_start_pos[0:2] = options["target_xy_pos"]
@@ -251,12 +255,32 @@ class BasePushEnv(BaseGoalEnv):
         # sample rotation about z-axis
         z_angle = (np.pi - (-np.pi)) * self.np_random.random() - np.pi
         # sample x-pos
-        x_pos = self.initial_ee_xypos[0] + self.np_random.uniform(np.amin(self.range_obj_x_pos), np.amax(self.range_obj_x_pos))
+        x_pos = self.np_random.uniform(np.amin(self.range_obj_x_pos), np.amax(self.range_obj_x_pos))
         # sample y-pos 
-        y_pos = self.initial_ee_xypos[1] + self.np_random.uniform(np.amin(self.range_obj_y_pos), np.amax(self.range_obj_y_pos))
+        y_pos = self.np_random.uniform(np.amin(self.range_obj_y_pos), np.amax(self.range_obj_y_pos))
 
         pos = np.array([x_pos, y_pos, obj_height + self.height_table + 0.001])
         quat = rotations_utils.mujocoQuat_to_tftransformationsQuat(rotations.euler2quat(np.array([0,0,z_angle]))) # tf.transformations order
+
+        return pos, quat
+
+    def _sample_target_pose(self, obj_height):
+        """Sample a random target pose using range_target_*_pos (may differ from object ranges).
+
+        Keeping separate ranges for object and target ensures both spawn inside the
+        controller's reachable workspace even when the caller uses asymmetric ranges.
+        """
+        # sample rotation about z-axis
+        z_angle = (np.pi - (-np.pi)) * self.np_random.random() - np.pi
+        # sample x-pos using target-specific range
+        x_pos = self.np_random.uniform(
+            np.amin(self.range_target_x_pos), np.amax(self.range_target_x_pos))
+        # sample y-pos using target-specific range
+        y_pos = self.np_random.uniform(
+            np.amin(self.range_target_y_pos), np.amax(self.range_target_y_pos))
+
+        pos = np.array([x_pos, y_pos, obj_height + self.height_table + 0.001])
+        quat = rotations_utils.mujocoQuat_to_tftransformationsQuat(rotations.euler2quat(np.array([0, 0, z_angle])))
 
         return pos, quat
 

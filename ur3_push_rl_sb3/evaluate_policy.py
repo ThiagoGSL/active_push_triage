@@ -1,27 +1,82 @@
-import os
+import os, sys
 import numpy as np
 import gymnasium as gym
+
+# --- MONKEY PATCH MUJOCO RENDERING ---
+# Handles compatibility issue between gymnasium and newer mujoco versions (solver_iter vs solver_niter)
+try:
+    import gymnasium.envs.mujoco.mujoco_rendering as mujoco_rendering
+    for viewer_class_name in ['WindowViewer', 'OffScreenViewer']:
+        if hasattr(mujoco_rendering, viewer_class_name):
+            viewer_class = getattr(mujoco_rendering, viewer_class_name)
+            if hasattr(viewer_class, '_create_overlay'):
+                original_create_overlay = viewer_class._create_overlay
+                def make_safe_overlay(orig):
+                    def safe_create_overlay(self):
+                        try:
+                            orig(self)
+                        except AttributeError:
+                            pass
+                    return safe_create_overlay
+                viewer_class._create_overlay = make_safe_overlay(original_create_overlay)
+except ImportError:
+    pass
+# -------------------------------------
+
 from ur3_push_rl_sb3.utils import parse_args, get_run_name, get_log_paths
 from stable_baselines3.common.vec_env import VecVideoRecorder
 from stable_baselines3 import PPO
+import json
 import logging
 import time
 
-# input args that determine dir name of best model
 config, cmd_args, config_parser = parse_args()
-run_name = get_run_name(config, cmd_args, config_parser)
 
-# log paths
-# plots
-plot_path = os.path.join(config.logDir, "plots")
+# ── Resolve eval_path ────────────────────────────────────────────────────────
+# Option A: --evalPath points directly to the run's root folder.
+#           eval_path = <evalPath>/evaluation/   (contains best_model.zip)
+# Option B: legacy behaviour — derive run_name via get_run_name + get_log_paths.
+# ─────────────────────────────────────────────────────────────────────────────
+if config.evalPath is not None:
+    eval_dir_name = "evaluation"
+    eval_path = os.path.join(os.path.normpath(config.evalPath), eval_dir_name)
+    if not os.path.isdir(eval_path):
+        print(f"[ERROR] evaluation folder not found: {eval_path}")
+        print(f"        Make sure --evalPath points to the run root (not to 'evaluation/' itself).")
+        sys.exit(1)
+    if not os.path.isfile(os.path.join(eval_path, "best_model.zip")):
+        print(f"[ERROR] best_model.zip not found in: {eval_path}")
+        print(f"        Training may not have completed its first evaluation yet.")
+        sys.exit(1)
+else:
+    # Legacy: reconstruct path from run_name (works for old timestamp-less runs)
+    run_name = get_run_name(config, cmd_args, config_parser)
+    _, eval_path, _, _ = get_log_paths(config.logDir, run_name)
+
+# plots / videos — base dir: logDir se disponível, senão parent do evalPath
+_base_dir = config.logDir if config.logDir else os.path.dirname(os.path.dirname(eval_path))
+plot_path = os.path.join(_base_dir, "plots")
 if len(config.ePlotName) > 0:
     os.makedirs(plot_path, exist_ok=True)
 # videos
-video_path = os.path.join(config.logDir, "videos")
-if len(config.eVideoName) > 0 and not "Ros" in config.eEnvStr:
+video_path = os.path.join(_base_dir, "videos")
+if len(config.eVideoName) > 0 and "Ros" not in config.eEnvStr:
     os.makedirs(video_path, exist_ok=True)
-# best model
-_, eval_path, _, _ = get_log_paths(config.logDir, run_name)
+
+
+# Load training config FIRST so we inherit parameters like numStackedObs
+_search_eval_path = config.evalPath if config.evalPath else os.path.dirname(eval_path)
+if 'best_model.zip' in _search_eval_path:
+    _search_eval_path = os.path.dirname(_search_eval_path)
+if 'evaluation' in _search_eval_path:
+    _search_eval_path = os.path.dirname(_search_eval_path)
+
+with open(os.path.join(_search_eval_path, 'logs', 'config.txt'), 'r') as f:
+    train_config = json.load(f)
+
+for k, v in train_config.items():
+    if not hasattr(config, k) or getattr(config, k) is None:
+        setattr(config, k, v)
 
 # environment
 # object params
@@ -79,6 +134,17 @@ if "Simple" not in config.eEnvStr:
         "use_obs_history": config.useGRUFeatExtractor,
         "num_stack_obs": config.numStackedObs
     })
+else:
+    env_kwargs.update({
+        "ee_to_obj_reward_scale":      config.eeToObjRewardScale,
+        "torque_penalty_scale":        config.torquePenaltyScale,
+        "manipulability_reward_scale": config.manipulabilityRewardScale,
+        "manipulability_metric":       config.manipulabilityMetric,
+        "action_rate_penalty_scale":   config.actionRatePenaltyScale,
+        "success_bonus":               config.successBonus,
+        "early_termination_on_success": bool(config.earlyTerminationOnSuccess),
+        "randomize_initial_joints":    bool(config.randomizeInitialJoints),
+    })
 
 env_kwargs.update({"render_mode": render_mode, 
                     "use_sim_config": config.eUseSimConfig,
@@ -104,8 +170,15 @@ if config.thresholdLatentSpace != config.eThresholdLatentSpace:
 
 env = gym.envs.make(config.eEnvStr, **env_kwargs)
 
+if "SimpleEnv" in config.eEnvStr and config.numStackedObs is not None:
+    from stable_baselines3.common.vec_env import DummyVecEnv, VecFrameStack
+    venv = DummyVecEnv([lambda: env])
+    venv = VecFrameStack(venv, n_stack=config.numStackedObs)
+else:
+    venv = env
+
 # load best model
-model = PPO.load(path=os.path.join(eval_path,"best_model"), env=env)
+model = PPO.load(path=os.path.join(eval_path,"best_model"), env=venv)
 venv = model.get_env()
 venv.seed(config.eEvalSeed)
 
@@ -168,6 +241,7 @@ for i in range(0,config.eNumEvalEpisodes):
 
     # distance at the end of an episode
     distance_pos[i,2] = info[0]["dist_pos"]
+    success[i,-1] = info[0]["is_success"]
 
     rewards[i] = sum_ep_rewards
     if "num_corrective_movements" in info[0].keys():
@@ -192,3 +266,4 @@ if "num_corrective_movements" in info[0].keys():
     print(f"mean num_dist_corrections: {np.mean(num_dist_corrections):.2f} +/- {np.std(num_dist_corrections):.2f}, min num_dist_corrections: {int(np.min(num_dist_corrections))}, max num_dist_corrections: {int(np.max(num_dist_corrections))}")
 print()
 
+venv.close()

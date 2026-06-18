@@ -1,0 +1,14 @@
+{
+  "OS": "Windows-10-10.0.26200-SP0 10.0.26200",
+  "Python": "3.11.14",
+  "Stable-Baselines3": "2.1.0a4",
+  "PyTorch": "2.12.0.dev20260408+cu128",
+  "GPU Enabled": "True",
+  "Numpy": "1.23.5",
+  "Cloudpickle": "3.1.2",
+  "Gymnasium": "0.28.1",
+  "OpenCV": "4.11.0",
+  "Tensorboard": "2.20.0",
+  "Ray": "2.55.1",
+  "MuJoCo": "3.9.0"
+}

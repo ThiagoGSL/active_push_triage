@@ -3,6 +3,69 @@ import gymnasium as gym
 from gymnasium.wrappers import TimeLimit
 from stable_baselines3.common.monitor import Monitor
 
+
+def make_warp_env(num_train: int,
+                  max_episode_steps: int = 200,
+                  sparse_reward: bool = True,
+                  ee_to_obj_reward_scale: float = 0.2,
+                  action_scaling_factor: float = 0.6,
+                  n_substeps: int = 40,
+                  seed: int = 0,
+                  torque_penalty_scale: float = 0.001,
+                  manipulability_reward_scale: float = 0.0,
+                  manipulability_metric: str = "yoshikawa",
+                  action_rate_penalty_scale: float = 0.0,
+                  success_bonus: float = 0.0,
+                  early_termination_on_success: bool = False,
+                  randomize_initial_joints: bool = False):
+    """Cria WarpVecEnv (MuJoCo Warp, GPU batch) compatível com SB3.
+
+    Substitui make_vec_envs() quando --useWarp=1 é passado.
+    Retorna (train_envs, eval_env) para compatibilidade com o script train.py.
+
+    Args:
+        num_train: número de mundos em paralelo na GPU (ex: 64, 128, 256)
+        max_episode_steps: truncamento de episódios (TimeLimit)
+        sparse_reward: True = recompensa esparsa (-1/0)
+        ee_to_obj_reward_scale: escala do reward de aproximação EE→obj
+        action_scaling_factor: fator de escala das ações
+        n_substeps: substeps de física por gym step
+        seed: seed do RNG
+        torque_penalty_scale: penalidade por esforço articular (0=desabilitado)
+        manipulability_reward_scale: bônus de manipulabilidade por step (0=desabilitado)
+        manipulability_metric: 'yoshikawa' ou 'min_sv'
+
+    Returns:
+        train_envs: WarpVecEnv com num_train mundos
+        eval_env: WarpVecEnv com 1 mundo (para avaliação)
+    """
+    from ur3_push_mujoco.gym_ur3_push.envs.mujoco.ur3_push_simple_warp_env import MuJoCoUR3PushSimpleWarpEnv
+    from ur3_push_mujoco.gym_ur3_push.envs.mujoco.warp_vec_env import WarpVecEnv
+
+    warp_kwargs = dict(
+        n_substeps=n_substeps,
+        sparse_reward=sparse_reward,
+        ee_to_obj_reward_scale=ee_to_obj_reward_scale,
+        action_scaling_factor=action_scaling_factor,
+        torque_penalty_scale=torque_penalty_scale,
+        manipulability_reward_scale=manipulability_reward_scale,
+        manipulability_metric=manipulability_metric,
+        action_rate_penalty_scale=action_rate_penalty_scale,
+        success_bonus=success_bonus,
+        early_termination_on_success=early_termination_on_success,
+        randomize_initial_joints=randomize_initial_joints,
+    )
+
+    # Ambiente de treinamento: num_train mundos
+    warp_train = MuJoCoUR3PushSimpleWarpEnv(nworld=num_train, seed=seed, **warp_kwargs)
+    train_envs = WarpVecEnv(warp_train, max_episode_steps=max_episode_steps)
+
+    # Ambiente de avaliação: 1 mundo (mesmo config, seed diferente)
+    warp_eval = MuJoCoUR3PushSimpleWarpEnv(nworld=1, seed=seed + 99999, **warp_kwargs)
+    eval_env = WarpVecEnv(warp_eval, max_episode_steps=max_episode_steps)
+
+    return train_envs, eval_env
+
 def make_vec_envs(env_str, env_has_id, log_path, vec_env_cls, num_train, train_seed, eval_seed, rng_states_envs, override_monitor_logs, max_episode_steps=None, **env_kwargs):
     # adapted from stable_baselines3 (make_vec_env), but correctly sets env_id and rng_states
     # train_seed: seed over all train environments. The i-th environment seed wille be set with i+seed

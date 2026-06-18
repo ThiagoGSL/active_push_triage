@@ -6,8 +6,8 @@ import torch
 from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import CallbackList, EvalCallback, StopTrainingOnMaxEpisodes
 from stable_baselines3.common.logger import configure
-from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv
-from ur3_push_rl_sb3.make_envs import make_vec_envs
+from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecNormalize
+from ur3_push_rl_sb3.make_envs import make_vec_envs, make_warp_env
 from ur3_push_rl_sb3.utils import (parse_args, 
                                      get_run_name, 
                                      get_log_paths, 
@@ -26,45 +26,80 @@ def main():
     eval_dir_name = "evaluation"
     log_dir_name = "logs"
     cp_dir_name = "checkpoint"
-    save_path, eval_path, log_path, cp_path = get_log_paths(config.logDir, 
-                                                            get_run_name(config, cmd_args, config_parser),
-                                                            eval_dir_name,
-                                                            log_dir_name,
-                                                            cp_dir_name)
-    
-    # continue training?
-    continue_train = ""
-    reset_num_timesteps = True # new training curves in tensorboard
-    rng_states_envs = None # set train/test seed instead if loading RNG states
-    override_monitor_logs = True # append logs to existing monitor log files?
-    if os.path.exists(log_path):
-        print(f"\nlog path already exists. Current log path is: {save_path}")
-        while continue_train not in ["y", "n", "r"]:
-            continue_train = input("Continue training (y), Restart and overwrite (r), or Cancel (n)? ")
-    
-        if continue_train == "n":
-            print("No files have been changed.")
-            sys.exit()
-        elif continue_train == "r":
-            print(f"Overwriting existing log path: {save_path}")
-            shutil.rmtree(save_path)
-            os.makedirs(save_path, exist_ok=True)
-        elif not os.path.exists(cp_path):
-            # continue_train == "y", but no checkpoint exists
-            print("Cannot continue training: log path exists, but no checkpoint found\n")
-            sys.exit()
-        else:
-            # continue_train == "y" and checkpoint exists
-            reset_num_timesteps = False # continue training curves in tensorboard
-            override_monitor_logs = False
-            # reset log and evaluation files 
-            shutil.rmtree(path=log_path)
-            shutil.rmtree(path=eval_path)
-            shutil.copytree(src=os.path.join(cp_path, log_dir_name), dst=log_path)
-            shutil.copytree(src=os.path.join(cp_path, eval_dir_name), dst=eval_path)
-            # load RNG states
-            with open(os.path.join(cp_path,"rng_states_gymenvs.pkl"), mode="rb") as rng_env_file:
-                rng_states_envs = pickle.load(rng_env_file)
+
+    if config.resumePath is not None:
+        # ── Resume mode ──────────────────────────────────────────────────────
+        # Derive all paths from the existing run directory supplied by the user.
+        save_path = os.path.normpath(config.resumePath)
+        eval_path = os.path.join(save_path, eval_dir_name)
+        log_path  = os.path.join(save_path, log_dir_name)
+        cp_path   = os.path.join(save_path, cp_dir_name)
+
+        if not os.path.isdir(save_path):
+            print(f"[ERROR] --resumePath directory does not exist: {save_path}")
+            sys.exit(1)
+        if not os.path.isdir(cp_path):
+            print(f"[ERROR] No checkpoint found inside: {cp_path}\n"
+                  f"        Start a new run first so that a checkpoint is created.")
+            sys.exit(1)
+
+        print(f"\n[Resume] Continuing training from: {save_path}")
+        continue_train = "y"
+        reset_num_timesteps = False
+        override_monitor_logs = False
+
+        # Restore logs/evaluation from the checkpoint snapshot
+        shutil.rmtree(path=log_path, ignore_errors=True)
+        shutil.rmtree(path=eval_path, ignore_errors=True)
+        shutil.copytree(src=os.path.join(cp_path, log_dir_name), dst=log_path)
+        shutil.copytree(src=os.path.join(cp_path, eval_dir_name), dst=eval_path)
+
+        # Load RNG states saved at checkpoint
+        with open(os.path.join(cp_path, "rng_states_gymenvs.pkl"), mode="rb") as rng_env_file:
+            rng_states_envs = pickle.load(rng_env_file)
+
+    else:
+        # ── New run mode ──────────────────────────────────────────────────────
+        save_path, eval_path, log_path, cp_path = get_log_paths(
+            config.logDir,
+            get_run_name(config, cmd_args, config_parser),
+            eval_dir_name,
+            log_dir_name,
+            cp_dir_name,
+        )
+
+        continue_train = ""
+        reset_num_timesteps = True
+        rng_states_envs = None
+        override_monitor_logs = True
+
+        # A timestamp-based name is always unique, so log_path should never exist.
+        # Guard kept for safety (e.g. two processes started within the same second).
+        if os.path.exists(log_path):
+            print(f"\n[WARNING] log path already exists: {save_path}")
+            while continue_train not in ["y", "n", "r"]:
+                continue_train = input("Continue training (y), Restart and overwrite (r), or Cancel (n)? ")
+
+            if continue_train == "n":
+                print("No files have been changed.")
+                sys.exit()
+            elif continue_train == "r":
+                print(f"Overwriting existing log path: {save_path}")
+                shutil.rmtree(save_path)
+                os.makedirs(save_path, exist_ok=True)
+            elif not os.path.exists(cp_path):
+                print("Cannot continue training: log path exists, but no checkpoint found\n")
+                sys.exit()
+            else:
+                reset_num_timesteps = False
+                override_monitor_logs = False
+                shutil.rmtree(path=log_path)
+                shutil.rmtree(path=eval_path)
+                shutil.copytree(src=os.path.join(cp_path, log_dir_name), dst=log_path)
+                shutil.copytree(src=os.path.join(cp_path, eval_dir_name), dst=eval_path)
+                with open(os.path.join(cp_path, "rng_states_gymenvs.pkl"), mode="rb") as rng_env_file:
+                    rng_states_envs = pickle.load(rng_env_file)
+
     
     try:
         # object reset options
@@ -109,7 +144,14 @@ def main():
         else:
             # SimpleEnv-specific params
             env_kwargs.update({
-                "ee_to_obj_reward_scale": config.eeToObjRewardScale
+                "ee_to_obj_reward_scale":      config.eeToObjRewardScale,
+                "torque_penalty_scale":        config.torquePenaltyScale,
+                "manipulability_reward_scale": config.manipulabilityRewardScale,
+                "manipulability_metric":       config.manipulabilityMetric,
+                "action_rate_penalty_scale":   config.actionRatePenaltyScale,
+                "success_bonus":               config.successBonus,
+                "early_termination_on_success": bool(config.earlyTerminationOnSuccess),
+                "randomize_initial_joints":    bool(config.randomizeInitialJoints),
             })
     
         env_kwargs.update({"render_mode": "rgb_array",
@@ -119,20 +161,64 @@ def main():
         env_has_id = False
     
         # make envs
-        train_envs, eval_env = make_vec_envs(config.envStr, 
-                                            env_has_id,
-                                            log_path, 
-                                            vec_env_cls,
-                                            config.numTrain, 
-                                            config.trainSeed, 
-                                            config.evalSeed, 
-                                            rng_states_envs,
-                                            override_monitor_logs,
-                                            max_episode_steps=config.maxEpisodeSteps,
-                                            **env_kwargs)
+        if getattr(config, 'useWarp', 0):
+            # --- MuJoCo Warp: GPU batch (N mundos em paralelo) ---
+            print(f"[WarpVecEnv] Usando MuJoCo Warp com nworld={config.numTrain} mundos na GPU")
+            train_envs, eval_env = make_warp_env(
+                num_train=config.numTrain,
+                max_episode_steps=config.maxEpisodeSteps,
+                sparse_reward=bool(config.sparseReward),
+                ee_to_obj_reward_scale=config.eeToObjRewardScale,
+                action_scaling_factor=config.actionScalingFactor,
+                n_substeps=config.numSimSteps,
+                seed=config.trainSeed,
+                torque_penalty_scale=config.torquePenaltyScale,
+                manipulability_reward_scale=config.manipulabilityRewardScale,
+                manipulability_metric=config.manipulabilityMetric,
+                action_rate_penalty_scale=config.actionRatePenaltyScale,
+                success_bonus=config.successBonus,
+                early_termination_on_success=bool(config.earlyTerminationOnSuccess),
+                randomize_initial_joints=bool(config.randomizeInitialJoints),
+            )
+            
+            if getattr(config, 'numStackedObs', None) is not None:
+                from stable_baselines3.common.vec_env import VecFrameStack
+                print(f"[WarpVecEnv] Aplicando Frame Stacking (n={config.numStackedObs})")
+                train_envs = VecFrameStack(train_envs, n_stack=config.numStackedObs)
+                eval_env = VecFrameStack(eval_env, n_stack=config.numStackedObs)
+
+            if getattr(config, 'useWarp', 0) and getattr(config, 'normalizeReward', True):
+                # VecNormalize: normaliza apenas o reward (obs ja sao bem-condicionadas)
+                # eval_env: norm_reward=False para que as metricas de avaliacao sejam legíveis
+                vecnorm_path = os.path.join(cp_path, 'vecnormalize.pkl') if continue_train not in ['', 'r'] else None
+                if vecnorm_path and os.path.exists(vecnorm_path):
+                    print(f"[VecNormalize] Restaurando estatisticas de: {vecnorm_path}")
+                    train_envs = VecNormalize.load(vecnorm_path, train_envs)
+                    train_envs.training = True
+                    train_envs.norm_reward = True
+                else:
+                    print("[VecNormalize] Inicializando normalizacao de reward (norm_obs=False, norm_reward=True)")
+                    train_envs = VecNormalize(train_envs, norm_obs=False, norm_reward=True, clip_reward=10.0)
+                # Eval env: compartilha stats de obs mas NAO normaliza reward (para avaliacao legivel)
+                eval_env = VecNormalize(eval_env, norm_obs=False, norm_reward=False, training=False)
+        else:
+            # --- CPU: SubprocVecEnv (comportamento original) ---
+            train_envs, eval_env = make_vec_envs(config.envStr, 
+                                                env_has_id,
+                                                log_path, 
+                                                vec_env_cls,
+                                                config.numTrain, 
+                                                config.trainSeed, 
+                                                config.evalSeed, 
+                                                rng_states_envs,
+                                                override_monitor_logs,
+                                                max_episode_steps=config.maxEpisodeSteps,
+                                                **env_kwargs)
     
     
         if continue_train in ["", "r"]: # train new model
+            # garante que o diretório de logs existe (WarpVecEnv não cria via Monitor)
+            os.makedirs(log_path, exist_ok=True)
             # save config
             with open(os.path.join(log_path,"config.txt"),"w") as f:
                 json.dump(config.__dict__, f, indent=2)
@@ -182,6 +268,10 @@ def main():
         else:
             # continue_train == "y"
             model = PPO.load(path=os.path.join(cp_path,"model"), env=train_envs)
+            # Restaurar VecNormalize se existir (ja carregado acima, mas garante sync)
+            vecnorm_path = os.path.join(cp_path, 'vecnormalize.pkl')
+            if isinstance(train_envs, VecNormalize) and os.path.exists(vecnorm_path):
+                train_envs.load(vecnorm_path, train_envs)
     
         # logger
         logger = configure(log_path, ["stdout", "csv", "tensorboard"])
@@ -189,10 +279,17 @@ def main():
     
         # callbacks
         stop_train_cb = StopTrainingOnMaxEpisodes(max_episodes=config.maxTrainEpisodes, verbose=1)
+        # Para Warp, evalFreq ja foi calculado com base em numTrain no utils.py,
+        # e o EvalCallback conta em gym steps (cada step = 1 no WarpVecEnv, mas envolve N mundos).
+        # Nao dividir novamente por numTrain para evitar avaliacao a cada step.
+        if getattr(config, 'useWarp', 0):
+            eval_freq_steps = max(1, config.evalFreq)  # ja em gym steps
+        else:
+            eval_freq_steps = max(1, int(config.evalFreq / config.numTrain))
         eval_cb = EvalCallback( eval_env, 
                                 best_model_save_path=eval_path,
                                 log_path=eval_path, 
-                                eval_freq=max(1, int(config.evalFreq / config.numTrain)), 
+                                eval_freq=eval_freq_steps,
                                 n_eval_episodes=config.nEvalEpisodes,
                                 deterministic=config.determinsticEvalPolicy)
         checkpoint_cb = CustomCheckpointCallback(
