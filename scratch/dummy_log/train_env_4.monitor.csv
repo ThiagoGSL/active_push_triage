@@ -1,0 +1,4 @@
+#{"t_start": 1782329834.34243, "env_id": "MujocoUR3PushSimpleEnv"}
+r,l,t,is_success
+-100.0,100,9.381183,False
+-100.0,100,12.634886,False
