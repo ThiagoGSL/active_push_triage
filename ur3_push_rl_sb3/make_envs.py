@@ -5,6 +5,7 @@ from stable_baselines3.common.monitor import Monitor
 
 
 def make_warp_env(num_train: int,
+                  num_eval: int = 1,
                   max_episode_steps: int = 200,
                   sparse_reward: bool = True,
                   ee_to_obj_reward_scale: float = 0.2,
@@ -24,7 +25,8 @@ def make_warp_env(num_train: int,
     Retorna (train_envs, eval_env) para compatibilidade com o script train.py.
 
     Args:
-        num_train: número de mundos em paralelo na GPU (ex: 64, 128, 256)
+        num_train: número de mundos em paralelo na GPU para treinamento
+        num_eval: número de mundos em paralelo na GPU para avaliação
         max_episode_steps: truncamento de episódios (TimeLimit)
         sparse_reward: True = recompensa esparsa (-1/0)
         ee_to_obj_reward_scale: escala do reward de aproximação EE→obj
@@ -37,7 +39,7 @@ def make_warp_env(num_train: int,
 
     Returns:
         train_envs: WarpVecEnv com num_train mundos
-        eval_env: WarpVecEnv com 1 mundo (para avaliação)
+        eval_env: WarpVecEnv com num_eval mundos (para avaliação paralela)
     """
     from ur3_push_mujoco.gym_ur3_push.envs.mujoco.ur3_push_simple_warp_env import MuJoCoUR3PushSimpleWarpEnv
     from ur3_push_mujoco.gym_ur3_push.envs.mujoco.warp_vec_env import WarpVecEnv
@@ -60,8 +62,8 @@ def make_warp_env(num_train: int,
     warp_train = MuJoCoUR3PushSimpleWarpEnv(nworld=num_train, seed=seed, **warp_kwargs)
     train_envs = WarpVecEnv(warp_train, max_episode_steps=max_episode_steps)
 
-    # Ambiente de avaliação: 1 mundo (mesmo config, seed diferente)
-    warp_eval = MuJoCoUR3PushSimpleWarpEnv(nworld=1, seed=seed + 99999, **warp_kwargs)
+    # Ambiente de avaliação: num_eval mundos (mesmo config, seed diferente)
+    warp_eval = MuJoCoUR3PushSimpleWarpEnv(nworld=num_eval, seed=seed + 99999, **warp_kwargs)
     eval_env = WarpVecEnv(warp_eval, max_episode_steps=max_episode_steps)
 
     return train_envs, eval_env

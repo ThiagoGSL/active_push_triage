@@ -30,15 +30,15 @@ class CustomCheckpointCallback(BaseCallback):
 
     def _on_step(self) -> bool:
         # Off-policy algorithms (SAC) never call _on_rollout_end.
-        # Compare against num_timesteps (total individual transitions) so that
-        # save_freq has the same semantic as totalLearningTimesteps (not VecEnv steps).
+        # Fix: SAC should save based on a large timestep threshold (e.g. 500k steps) 
+        # because save_freq is calibrated for PPO rollouts.
         is_on_policy = hasattr(self.model, 'n_steps')  # PPO has n_steps; SAC does not
         if not is_on_policy:
             if self._next_sac_save is None:
-                self._next_sac_save = self.save_freq  # first threshold
+                self._next_sac_save = 500_000  # Save every 500k timesteps
             if self.model.num_timesteps >= self._next_sac_save:
                 self._save_checkpoint()
-                self._next_sac_save += self.save_freq  # advance to next threshold
+                self._next_sac_save += 500_000  # advance to next threshold
         return True
     
     def _on_rollout_end(self) -> bool:

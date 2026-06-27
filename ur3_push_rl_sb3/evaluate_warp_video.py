@@ -45,18 +45,19 @@ def main():
         ee_to_obj_reward_scale=0.0,
         action_scaling_factor=train_config.get("actionScalingFactor", 0.05),
         n_substeps=train_config.get("numSimSteps", 120),
-        seed=train_config.get("eEvalSeed", 42),
+        seed=np.random.randint(0, 100000), # Garante posições aleatórias a cada execução
         torque_penalty_scale=train_config.get("torquePenaltyScale", 0.001),
         action_rate_penalty_scale=train_config.get("actionRatePenaltyScale", 0.05),
-        success_bonus=train_config.get("successBonus", 10.0),
-        early_termination_on_success=False, # Forçado para False para gravar o pós-sucesso
-        randomize_initial_joints=bool(train_config.get("randomizeInitialJoints", 1)),
+        success_bonus=train_config.get("successBonus", 0.0),
+        early_termination_on_success=0, # FORÇADO: Não terminar para podermos gravar o robô parado
+        randomize_initial_joints=bool(train_config.get("randomizeInitialJoints", 0)),
         manipulability_reward_scale=train_config.get("manipulabilityRewardScale", 0.01),
         manipulability_metric=train_config.get("manipulabilityMetric", "yoshikawa")
     )
     
     warp_wenv = eval_env
-    eval_env = VecFrameStack(eval_env, n_stack=args.numStackedObs)
+    if args.numStackedObs > 1:
+        eval_env = VecFrameStack(eval_env, n_stack=args.numStackedObs)
 
     model_path = os.path.join(args.evalPath, "evaluation", "best_model")
     if not os.path.exists(model_path + ".zip"):
@@ -84,8 +85,54 @@ def main():
     if args.dynamicTarget != "none":
         # Força o objeto a surgir sempre no centro geométrico da mesa
         warp_wenv._wenv._sample_xy_away_from = lambda *args, **kwargs: np.array([0.375, 0.0])
+    else:
+        # Posições pre-programadas para garantir benchmark justo e comparável
+        preprogrammed_positions = [
+            (np.array([0.30, -0.15]), np.array([0.45,  0.15])), # 1. Diagonal Longa (inferior esquerdo para superior direito)
+            (np.array([0.45, 0.15]), np.array([0.45,  -0.15])), # 2. Linha Reta Y Oposta (superior direito para superior esquerdo)
+            (np.array([0.45,  -0.15]), np.array([0.30, 0.15])), # 3. Diagonal Longa (superior esquerdo para inferior direito)
+            (np.array([0.45,  0.15]), np.array([0.30, -0.15])), # 4. Diagonal Longa Oposta (superior direito para inferior esquerdo)
+            (np.array([0.375, -0.15]), np.array([0.375, 0.15])), # 5. Linha Reta Y (esquerda para direita)
+            (np.array([0.375, 0.15]), np.array([0.375, -0.15])), # 6. Linha Reta Y (direita para esquerda)
+            (np.array([0.30, -0.15]), np.array([0.45, -0.15])),  # 7. Linha Reta X (canto esquerdo)
+            (np.array([0.30, 0.0]), np.array([0.45, 0.0])),      # 8. Linha Reta X (centro)
+            #(np.array([0.30, 0.15]), np.array([0.45, 0.15])),    # 9. Linha Reta X (canto direito)
+            #(np.array([0.32, 0.0]), np.array([0.45, 0.05])),     # 10. Empurrão Curto/Desalinhado
+        ]
+
+        class PositionSampler:
+            def __init__(self):
+                self.call_count = 0
+                
+            def __call__(self, ref_xy, min_dist):
+                episode_idx = (self.call_count // 2) % len(preprogrammed_positions)
+                is_target = (self.call_count % 2) == 1
+                self.call_count += 1
+                if is_target:
+                    return preprogrammed_positions[episode_idx][1]
+                else:
+                    return preprogrammed_positions[episode_idx][0]
+
+        warp_wenv._wenv._sample_xy_away_from = PositionSampler()
 
     obs = eval_env.reset()
+    has_succeeded_this_episode = False
+
+    video_time = 0.0
+    physics_time = 0.0
+    fps = 30
+    dt_video = 1.0 / fps
+    dt_physics = train_config.get("numSimSteps", 120) * 0.001
+
+    # Grab initial state
+    prev_qpos = warp_wenv._wenv._d_gpu.qpos.numpy()[0].copy()
+    
+    if hasattr(warp_wenv._wenv._d_gpu, 'mocap_pos'):
+        prev_mocap_pos = warp_wenv._wenv._d_gpu.mocap_pos.numpy()[0].copy()
+        prev_mocap_quat = warp_wenv._wenv._d_gpu.mocap_quat.numpy()[0].copy()
+    else:
+        prev_mocap_pos = None
+        prev_mocap_quat = None
 
     while episodes < args.eNumEvalEpisodes:
         if args.dynamicTarget == "circle":
@@ -111,40 +158,59 @@ def main():
         obs, r, dones, infos = eval_env.step(action)
         steps_in_episode += 1
         
-        # Sync GPU to CPU for rendering
-        d.qpos[:] = warp_wenv._wenv._d_gpu.qpos.numpy()[0]
-        d.qvel[:] = warp_wenv._wenv._d_gpu.qvel.numpy()[0]
+        # Trava o status de sucesso para o resto do episódio
+        if infos[0].get('is_success', False):
+            has_succeeded_this_episode = True
         
-        # Update target body position visually
-        try:
-            target_xy = warp_wenv._wenv._target_xypos[0]
-            body_id = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_BODY, 'target')
-            if body_id >= 0:
-                m.body_pos[body_id][0] = target_xy[0]
-                m.body_pos[body_id][1] = target_xy[1]
-        except Exception as e:
-            pass
-        
-        # Site positions are important to update object visual positions if they are mocap or kinematic
-        if hasattr(warp_wenv._wenv._d_gpu, 'mocap_pos'):
-            try:
-                d.mocap_pos[:] = warp_wenv._wenv._d_gpu.mocap_pos.numpy()[0]
-                d.mocap_quat[:] = warp_wenv._wenv._d_gpu.mocap_quat.numpy()[0]
-            except: pass
+        # Save current state for interpolation
+        curr_qpos = warp_wenv._wenv._d_gpu.qpos.numpy()[0].copy()
+        if prev_mocap_pos is not None:
+            curr_mocap_pos = warp_wenv._wenv._d_gpu.mocap_pos.numpy()[0].copy()
+            curr_mocap_quat = warp_wenv._wenv._d_gpu.mocap_quat.numpy()[0].copy()
             
-        mujoco.mj_forward(m, d)
+        physics_time += dt_physics
         
-        # Render frame
-        renderer.update_scene(d, camera=-1)
-        pixels = renderer.render()
-        writer.append_data(pixels)
+        while video_time <= physics_time:
+            alpha = (video_time - (physics_time - dt_physics)) / dt_physics
+            alpha = max(0.0, min(1.0, alpha))
+            
+            d.qpos[:] = prev_qpos + alpha * (curr_qpos - prev_qpos)
+            
+            # Update target body position visually
+            try:
+                target_xy = warp_wenv._wenv._target_xypos[0]
+                body_id = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_BODY, 'target')
+                if body_id >= 0:
+                    m.body_pos[body_id][0] = target_xy[0]
+                    m.body_pos[body_id][1] = target_xy[1]
+            except Exception as e:
+                pass
+            
+            if prev_mocap_pos is not None:
+                try:
+                    d.mocap_pos[:] = prev_mocap_pos + alpha * (curr_mocap_pos - prev_mocap_pos)
+                    d.mocap_quat[:] = prev_mocap_quat + alpha * (curr_mocap_quat - prev_mocap_quat)
+                except: pass
+                
+            mujoco.mj_forward(m, d)
+            renderer.update_scene(d, camera="eval_camera")
+            pixels = renderer.render()
+            writer.append_data(pixels)
+            
+            video_time += dt_video
+            
+        # Shift state
+        prev_qpos = curr_qpos.copy()
+        if prev_mocap_pos is not None:
+            prev_mocap_pos = curr_mocap_pos.copy()
+            prev_mocap_quat = curr_mocap_quat.copy()
         
         if dones[0]:
-            is_success = infos[0].get('is_success', False)
-            successes.append(is_success)
-            print(f"Episode {episodes}: Success = {is_success}")
+            successes.append(has_succeeded_this_episode)
+            print(f"Episode {episodes}: Success = {has_succeeded_this_episode}")
             episodes += 1
             steps_in_episode = 0
+            has_succeeded_this_episode = False
 
     writer.close()
     

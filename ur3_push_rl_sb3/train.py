@@ -173,6 +173,7 @@ def main():
             print(f"[WarpVecEnv] Usando MuJoCo Warp com nworld={config.numTrain} mundos na GPU")
             train_envs, eval_env = make_warp_env(
                 num_train=config.numTrain,
+                num_eval=config.nEvalEpisodes,
                 max_episode_steps=config.maxEpisodeSteps,
                 sparse_reward=bool(config.sparseReward),
                 ee_to_obj_reward_scale=config.eeToObjRewardScale,
@@ -193,6 +194,13 @@ def main():
                 print(f"[WarpVecEnv] Aplicando Frame Stacking (n={config.numStackedObs})")
                 train_envs = VecFrameStack(train_envs, n_stack=config.numStackedObs)
                 eval_env = VecFrameStack(eval_env, n_stack=config.numStackedObs)
+
+            # --- VEC MONITOR (Adicionado) ---
+            from stable_baselines3.common.vec_env import VecMonitor
+            print(f"[WarpVecEnv] Aplicando VecMonitor")
+            train_envs = VecMonitor(train_envs, os.path.join(log_path, "train_warp"))
+            if eval_env is not None:
+                eval_env = VecMonitor(eval_env, os.path.join(log_path, "eval_warp"))
 
             if getattr(config, 'useWarp', 0) and getattr(config, 'normalizeReward', True):
                 # VecNormalize: normaliza apenas o reward (obs ja sao bem-condicionadas)
@@ -353,7 +361,7 @@ def main():
         # train model
         model.learn(total_timesteps=config.totalLearningTimesteps - model.num_timesteps,
                     callback=callbacks,
-                    log_interval=config.numTrain,
+                    log_interval=1,
                     reset_num_timesteps=reset_num_timesteps,
                     progress_bar=True)
         

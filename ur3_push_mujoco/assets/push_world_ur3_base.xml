@@ -16,8 +16,10 @@
     </asset>
 
     <worldbody>
-        <geom name="ground_plane" pos="0.4 0. 0" type="plane" conaffinity="3" condim="3" size="2 2 10" material="floor_mat" group="2"/>
-        <geom name="table" pos="0.525 0. 0.2" size="0.35 0.45 0.2" conaffinity="3" type="box" material="table_mat" friction="0.8 0.005 0.0001" mass="200" group="2"/>
+        <geom name="ground_plane" pos="0.4 0. 0" type="plane" contype="2" conaffinity="1" condim="3" size="2 2 10" material="floor_mat" group="2"/>
+        <geom name="table" pos="0.525 0. 0.2" size="0.35 0.45 0.2" contype="4" conaffinity="1" type="box" material="table_mat" friction="0.8 0.005 0.0001" mass="200" group="2"/>
+
+        <camera name="eval_camera" pos="1.0 0.0 1.0" xyaxes="0 1 0 -0.8 0 0.6" fovy="45" />
 
         <body name="target" pos="0.5 0.1 0.44">
             <joint name="target_joint" type="free" damping="0.01"></joint>
